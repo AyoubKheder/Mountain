@@ -7,15 +7,55 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { wrap } from '../../core/context.js';
 import { ApiError } from '../../core/errors.js';
-import { getStoreBySlug } from '../stores/stores.service.js';
-import { listStorefrontProducts, products } from '../products/products.service.js';
-import { createOrder, orders } from '../orders/orders.service.js';
-import { createPayment } from '../payments/payments.service.js';
+import { getStoreBySlug, listPublishedStores } from '../stores/stores.service.js';
+import {
+  listStorefrontProducts,
+  isProductVisibleForStore,
+  products,
+} from '../products/products.service.js';
 import { isMongoConnected } from '../../core/db.js';
-import { ProductModel, StoreModel } from '../../core/models/index.js';
-import { money, newId } from '@mountain/utils';
+import { ProductModel } from '../../core/models/index.js';
+import { checkAvailability } from '../inventory/inventory.service.js';
+import { placeOrder, checkoutSettings } from '../checkout/checkout.service.js';
 
 export const storefrontModule = Router();
+
+/**
+ * 0. Marketplace listing — every store that opted into public discovery.
+ *
+ * Only published stores appear, and only their public profile: never tenant ids,
+ * settings or unpublished data. Product counts are computed live so the
+ * marketplace never shows a stale catalogue size.
+ */
+storefrontModule.get(
+  '/stores',
+  wrap(async (req, res) => {
+    const search = typeof req.query.search === 'string' ? req.query.search.toLowerCase() : undefined;
+    const category = typeof req.query.category === 'string' ? req.query.category.toLowerCase() : undefined;
+
+    let items = await listPublishedStores();
+
+    if (category && category !== 'all') {
+      items = items.filter((store) => (store.industry ?? '').toLowerCase() === category);
+    }
+    if (search) {
+      items = items.filter((store) =>
+        `${store.name} ${store.industry ?? ''} ${store.description ?? ''}`
+          .toLowerCase()
+          .includes(search),
+      );
+    }
+
+    const withCounts = await Promise.all(
+      items.map(async (store) => ({
+        ...store,
+        productCount: (await listStorefrontProducts(store.tenantId, store.id)).length,
+      })),
+    );
+
+    res.json({ items: withCounts, total: withCounts.length });
+  }),
+);
 
 /**
  * 1. Resolve Store by slug
@@ -61,11 +101,8 @@ storefrontModule.get(
     const search = typeof req.query.search === 'string' ? req.query.search.toLowerCase() : undefined;
     const category = typeof req.query.category === 'string' ? req.query.category.toLowerCase() : undefined;
 
-    // Fetch active products for this store or tenant
-    let items = await listStorefrontProducts(store.id);
-    if (items.length === 0) {
-      items = await listStorefrontProducts(store.tenantId);
-    }
+    // Tenant-scoped: the owning tenant is mandatory, the store only narrows it.
+    let items = await listStorefrontProducts(store.tenantId, store.id);
 
     if (search) {
       items = items.filter(
@@ -113,7 +150,8 @@ storefrontModule.get(
       const doc = await ProductModel.findOne({
         slug: productSlug!.toLowerCase(),
         status: 'ACTIVE',
-        $or: [{ storeId: store.id }, { tenantId: store.tenantId }],
+        tenantId: store.tenantId,
+        $or: [{ storeId: store.id }, { storeId: { $exists: false } }, { storeId: null }],
       });
       if (doc) {
         productDoc = {
@@ -136,8 +174,7 @@ storefrontModule.get(
       const match = [...products.values()].find(
         (p) =>
           p.slug.toLowerCase() === productSlug!.toLowerCase() &&
-          p.status === 'ACTIVE' &&
-          (!p.storeId || p.storeId === store.id || p.tenantId === store.tenantId),
+          isProductVisibleForStore(p, store.tenantId, store.id),
       );
       if (match) {
         productDoc = match as unknown as Record<string, unknown>;
@@ -164,6 +201,8 @@ const checkoutSchema = z.object({
     country: z.string().min(1),
     phone: z.string().optional(),
   }),
+  /** When supplied, the server reads the basket from the cart, not the body. */
+  cartId: z.string().min(1).optional(),
   items: z
     .array(
       z.object({
@@ -172,12 +211,54 @@ const checkoutSchema = z.object({
         quantity: z.number().int().positive().max(99),
       }),
     )
-    .min(1),
+    .optional(),
   paymentProvider: z.enum(['MOCK', 'STRIPE', 'CASH_ON_DELIVERY']).default('MOCK'),
+  /** May also be supplied as an `Idempotency-Key` header. */
+  idempotencyKey: z.string().min(8).max(200).optional(),
 });
 
 /**
- * 4. Public Storefront Checkout — shoppers place orders
+ * Live availability for a basket, so the storefront can warn before checkout
+ * instead of failing at the last step.
+ */
+storefrontModule.post(
+  '/stores/:slug/availability',
+  wrap(async (req, res) => {
+    const { slug } = req.params;
+    const store = await getStoreBySlug(slug!);
+    if (!store) {
+      throw new ApiError(404, `Store not found for slug: ${slug}`);
+    }
+
+    const parsed = z
+      .object({
+        items: z
+          .array(
+            z.object({
+              productId: z.string().min(1),
+              variantId: z.string().min(1),
+              quantity: z.number().int().positive(),
+            }),
+          )
+          .min(1),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) {
+      throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid availability payload');
+    }
+
+    const result = await checkAvailability(store.tenantId, parsed.data.items);
+    res.json(result);
+  }),
+);
+
+/**
+ * 4. Public Storefront Checkout — shoppers place orders.
+ *
+ * Delegates to the checkout orchestration, which holds stock before creating the
+ * order, upserts the customer, and rejects payment providers that cannot settle.
+ * Supplying an `Idempotency-Key` makes a double submit or a retry safe: the
+ * second attempt replays the first result (HTTP 200) instead of selling twice.
  */
 storefrontModule.post(
   '/stores/:slug/checkout',
@@ -193,43 +274,56 @@ storefrontModule.post(
       throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid checkout payload');
     }
 
-    const { customerEmail, shippingAddress, items, paymentProvider } = parsed.data;
+    const { customerEmail, customerName, shippingAddress, items, cartId, paymentProvider } =
+      parsed.data;
 
-    // Create the order scoped to this store and tenant
-    const order = createOrder({
-      tenantId: store.tenantId,
-      items,
-      shippingAmount: 0,
-      taxRate: 0,
-    });
-
-    order.storeId = store.id;
-    order.timeline.push({
-      status: 'PENDING',
-      at: new Date().toISOString(),
-      note: `Checkout started by ${customerEmail} on ${store.name}`,
-    });
-
-    // Create immediate payment if MOCK or CASH_ON_DELIVERY
-    let paymentRecord;
-    if (paymentProvider === 'MOCK' || paymentProvider === 'CASH_ON_DELIVERY') {
-      paymentRecord = await createPayment({
-        tenantId: store.tenantId,
-        orderId: order.id,
-        providerId: 'MOCK',
-        amount: order.totals.total,
-      });
+    if (!cartId && (!items || items.length === 0)) {
+      throw new ApiError(400, 'Provide either a cartId or a non-empty items list');
     }
 
-    res.status(201).json({
-      orderNumber: order.number,
-      orderId: order.id,
-      status: order.status,
-      totals: order.totals,
-      items: order.items,
+    const headerKey = req.headers['idempotency-key'];
+    const idempotencyKey =
+      parsed.data.idempotencyKey ?? (typeof headerKey === 'string' ? headerKey : undefined);
+
+    const result = await placeOrder({
+      tenantId: store.tenantId,
+      storeId: store.id,
+      cartId,
+      items,
       customerEmail,
+      customerName,
       shippingAddress,
-      payment: paymentRecord,
+      paymentProvider,
+      idempotencyKey,
+      // Tax and shipping come from the store's own settings, never the request.
+      ...checkoutSettings(store),
+    });
+
+    res.status(result.replayed ? 200 : 201).json({
+      orderNumber: result.order.number,
+      orderId: result.order.id,
+      status: result.order.status,
+      paymentStatus: result.order.paymentStatus,
+      totals: result.order.totals,
+      items: result.order.items,
+      customerEmail: result.customer?.email ?? customerEmail,
+      customerId: result.customer?.id,
+      shippingAddress,
+      cartId: result.cartId,
+      payment: result.payment
+        ? {
+            id: result.payment.id,
+            provider: result.payment.provider,
+            status: result.payment.status,
+            amount: result.payment.amount,
+            // A real PSP (Stripe) needs the shopper to confirm client-side; this
+            // is the token the storefront uses to do that. Null for providers
+            // that settle server-side.
+            clientSecret: result.payment.clientSecret ?? null,
+          }
+        : null,
+      /** True when the request replayed an earlier attempt instead of selling again. */
+      replayed: result.replayed,
     });
   }),
 );

@@ -62,6 +62,9 @@ tenantsModule.post(
       defaultCurrency: currency.toUpperCase(),
       defaultLocale: 'en',
       published: false,
+      // Checkout money settings — the merchant tunes these in their dashboard.
+      taxRate: 0,
+      shippingFlatRate: 0,
       createdAt: new Date().toISOString(),
     };
     stores.set(store.id, store);
@@ -111,10 +114,33 @@ tenantsModule.post(
   }),
 );
 
+/**
+ * Reads through to Mongo before the in-memory mirror, so a tenant is still
+ * readable by its owner after the API restarts.
+ */
+async function findTenant(id: string): Promise<TenantRecord | undefined> {
+  if (isMongoConnected()) {
+    const doc = await TenantModel.findOne({ _id: id });
+    if (doc) {
+      const record: TenantRecord = {
+        id: doc._id.toString(),
+        name: doc.name,
+        ownerId: doc.ownerId,
+        plan: doc.plan,
+        status: doc.status,
+        createdAt: doc.createdAt.toISOString(),
+      };
+      tenants.set(record.id, record);
+      return record;
+    }
+  }
+  return tenants.get(id);
+}
+
 tenantsModule.get(
   '/:id',
   wrap(async (req, res) => {
-    const tenant = tenants.get(req.params.id!);
+    const tenant = await findTenant(req.params.id!);
     if (!tenant) {
       throw new ApiError(404, 'Tenant not found');
     }

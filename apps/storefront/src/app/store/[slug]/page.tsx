@@ -1,29 +1,107 @@
 import { notFound } from 'next/navigation';
-import StorePreview from './StorePreview';
+import { AddToCart } from '../../../components/AddToCart';
+import { getStore, listStoreProducts, type Product } from '../../../lib/api';
+import { formatMoney } from '../../../lib/money';
 
-const storeData: Record<string, { name: string; category: string; description: string; rating: string; products: string[]; mark: string }> = {
-  'ayoub-fashion': { name: 'Ayoub Fashion', category: 'Fashion', description: 'Modern essentials and timeless pieces, made for everyday life.', rating: '4.9', mark: 'A', products: ['Essential Overshirt', 'Daily Canvas Tote', 'Relaxed Cotton Shirt'] },
-  'noura-living': { name: 'Noura Living', category: 'Home', description: 'Thoughtful homeware and warm details for spaces you love.', rating: '4.8', mark: 'N', products: ['Hand-thrown Ceramic Mug', 'Linen Cushion Cover', 'Oak Serving Board'] },
-  'pixel-house': { name: 'Pixel House', category: 'Electronics', description: 'Smart accessories and tech essentials for your daily setup.', rating: '4.7', mark: 'P', products: ['Magnetic Desk Stand', 'Travel Charging Kit', 'Wireless Mini Keyboard'] },
-  'zina-beauty': { name: 'Zina Beauty', category: 'Beauty', description: 'Simple, effective beauty rituals with carefully chosen ingredients.', rating: '4.9', mark: 'Z', products: ['Daily Face Oil', 'Hydrating Body Balm', 'Botanical Cleanser'] },
-  'crafted-north': { name: 'Crafted North', category: 'Handmade', description: 'Small-batch objects crafted by independent makers.', rating: '4.8', mark: 'C', products: ['Hand-carved Bowl', 'Woven Market Basket', 'Stoneware Vase'] },
-  'fuel-kitchen': { name: 'Fuel Kitchen', category: 'Food', description: 'Good food, local ingredients, and easy ways to eat well.', rating: '4.6', mark: 'F', products: ['Granola Breakfast Box', 'Pantry Essentials', 'Weekend Treat Box'] },
+export const dynamic = 'force-dynamic';
+
+const FALLBACK_THEME = {
+  name: 'Sage',
+  page: '#f4f8f3',
+  accent: '#1f5c45',
+  card: '#dce9df',
 };
-
-export function generateStaticParams() {
-  return Object.keys(storeData).map((slug) => ({ slug }));
-}
 
 export default async function StorePage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
-  const store = storeData[slug] ?? {
-    name: slug.split('-').map((word) => word ? word.charAt(0).toUpperCase() + word.slice(1) : '').join(' '),
-    category: 'Independent store',
-    description: 'A new independent store powered by Mountain.',
-    rating: 'New',
-    mark: slug[0]?.toUpperCase() ?? 'M',
-    products: ['Your first product', 'Your second product', 'Your third product'],
+
+  let store;
+  let products: Product[] = [];
+
+  try {
+    store = await getStore(slug);
+    products = (await listStoreProducts(slug)).items;
+  } catch {
+    notFound();
+  }
+
+  const colors = store.themeSettings?.colors;
+  const theme = {
+    name: store.themeSettings?.themeId ?? FALLBACK_THEME.name,
+    page: colors?.background ?? FALLBACK_THEME.page,
+    accent: colors?.accent ?? FALLBACK_THEME.accent,
+    card: colors?.card ?? FALLBACK_THEME.card,
   };
 
-  return <StorePreview slug={slug} store={store} />;
+  return (
+    <main className="store-page" style={{ background: theme.page }}>
+      <header className="nav">
+        <a className="brand" href="/">
+          <img className="brand-logo" src="/mountain-logo-cropped.jpg" alt="Mountain" /> mountain
+        </a>
+        <div className="nav-actions">
+          <a className="view-link" href={`/store/${slug}/cart`}>
+            Cart
+          </a>
+          <a className="view-link" href="/">
+            Back to marketplace
+          </a>
+        </div>
+      </header>
+
+      <section className="store-profile" style={{ background: theme.page }}>
+        <div className="profile-mark" style={{ background: theme.accent }}>
+          {store.name.charAt(0).toUpperCase()}
+        </div>
+        <div className="eyebrow" style={{ color: theme.accent }}>
+          {store.industry ?? 'independent'} store
+        </div>
+        <h1>{store.name}</h1>
+        <p>{store.description || 'A new independent store powered by Mountain.'}</p>
+        <div className="profile-meta">
+          <strong style={{ color: theme.accent }}>{products.length} products</strong>
+          <span>Verified store</span>
+          <span>mountain.tn/store/{slug}</span>
+        </div>
+      </section>
+
+      <section className="section">
+        <div className="section-heading">
+          <div>
+            <h2>Featured products</h2>
+            <p>Shop directly from {store.name}.</p>
+          </div>
+        </div>
+
+        {products.length ? (
+          <div className="product-grid">
+            {products.map((product, index) => (
+              <article className="product-card" key={product.id}>
+                <div
+                  className={`product-image product-${(index % 3) + 1}`}
+                  style={{ background: theme.card, color: theme.accent }}
+                >
+                  {store.name.charAt(0).toUpperCase()}
+                </div>
+                <div className="product-info">
+                  <h3>
+                    <a href={`/store/${slug}/product/${product.slug}`}>{product.title}</a>
+                  </h3>
+                  <div className="product-price" style={{ color: theme.accent }}>
+                    {formatMoney(product.price)}
+                  </div>
+                  <AddToCart slug={slug} productId={product.id} />
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="empty">
+            This store has not published any products yet. Once the merchant activates a product,
+            it appears here.
+          </div>
+        )}
+      </section>
+    </main>
+  );
 }

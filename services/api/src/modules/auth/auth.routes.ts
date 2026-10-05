@@ -6,8 +6,9 @@ import {
   authenticateUser,
   createTokenPair,
   rotateRefreshToken,
-  listTenantMemberships,
-  users,
+  listUserMemberships,
+  findUserById,
+  revokeUserSessions,
 } from './auth.service.js';
 import { ApiError } from '../../core/errors.js';
 import { wrap } from '../../core/context.js';
@@ -50,7 +51,7 @@ authModule.post(
   wrap(async (req, res) => {
     const input = parse(loginSchema, req.body);
     const user = await authenticateUser(input.email, input.password);
-    const membership = listTenantMemberships().find((m) => m.userId === user.id);
+    const [membership] = await listUserMemberships(user.id);
     const pair = await createTokenPair(user, membership, keys());
     res.json({
       user: { id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName },
@@ -72,7 +73,7 @@ authModule.get(
   '/me',
   authenticate(keys().accessSecret),
   wrap(async (req, res) => {
-    const user = users.get(req.auth!.userId);
+    const user = await findUserById(req.auth!.userId);
     if (!user) {
       throw new ApiError(404, 'User not found');
     }
@@ -86,5 +87,19 @@ authModule.get(
       merchantRole: req.auth!.merchantRole,
       permissions: req.auth!.permissions,
     });
+  }),
+);
+
+/**
+ * Revokes every refresh token the caller holds. Access tokens stay valid until
+ * they expire (15 minutes by default) — keep the access TTL short for that
+ * reason.
+ */
+authModule.post(
+  '/logout',
+  authenticate(keys().accessSecret),
+  wrap(async (req, res) => {
+    const revoked = revokeUserSessions(req.auth!.userId);
+    res.json({ revoked, note: 'All refresh tokens for this account have been revoked.' });
   }),
 );

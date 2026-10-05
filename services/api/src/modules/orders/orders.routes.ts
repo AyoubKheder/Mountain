@@ -5,18 +5,20 @@ import { resolveTenant } from '../../core/middleware/resolveTenant.js';
 import { requirePermission } from '../../core/middleware/requirePermission.js';
 import { ApiError } from '../../core/errors.js';
 import { wrap } from '../../core/context.js';
-import {
-  createOrder,
-  getOrder,
-  listOrders,
-  transitionOrder,
-} from './orders.service.js';
+import { getOrder, listOrders, transitionOrder } from './orders.service.js';
+import { placeOrder } from '../checkout/checkout.service.js';
 import { createOrderSchema, transitionOrderSchema, listOrdersQuery } from './orders.schemas.js';
 
 export const ordersModule = Router();
 
 ordersModule.use(authenticate(loadConfig().jwt.accessSecret), resolveTenant);
 
+/**
+ * Merchant-created order (phone, in-person, manual invoice). It still goes
+ * through the checkout orchestration so stock is held exactly like an online
+ * sale — a merchant cannot quietly oversell either. `paymentProvider: 'NONE'`
+ * records the order without capturing anything.
+ */
 ordersModule.post(
   '/',
   requirePermission('orders.create'),
@@ -25,8 +27,12 @@ ordersModule.post(
     if (!parsed.success) {
       throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid order payload');
     }
-    const order = createOrder({ ...parsed.data, tenantId: req.tenant!.tenantId });
-    res.status(201).json(order);
+    const result = await placeOrder({
+      ...parsed.data,
+      tenantId: req.tenant!.tenantId,
+      paymentProvider: 'NONE',
+    });
+    res.status(201).json(result.order);
   }),
 );
 
@@ -35,7 +41,7 @@ ordersModule.get(
   requirePermission('orders.read'),
   wrap(async (req, res) => {
     const query = listOrdersQuery.parse(req.query);
-    res.json(listOrders(req.tenant!.tenantId, query));
+    res.json(await listOrders(req.tenant!.tenantId, query));
   }),
 );
 
@@ -43,7 +49,7 @@ ordersModule.get(
   '/:id',
   requirePermission('orders.read'),
   wrap(async (req, res) => {
-    const order = getOrder(req.tenant!.tenantId, req.params.id!);
+    const order = await getOrder(req.tenant!.tenantId, req.params.id!);
     if (!order) {
       throw new ApiError(404, 'Order not found');
     }
@@ -59,7 +65,7 @@ ordersModule.post(
     if (!parsed.success) {
       throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid transition');
     }
-    const order = transitionOrder(
+    const order = await transitionOrder(
       req.tenant!.tenantId,
       req.params.id!,
       parsed.data.status,
