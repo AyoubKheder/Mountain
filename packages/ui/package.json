@@ -1,0 +1,11 @@
+{
+  "name": "@mountain/ui",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

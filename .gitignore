@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+.venv/
+
+# builds
+dist/
+build/
+.next/
+.turbo/
+*.tsbuildinfo
+
+# python
+__pycache__/
+*.pyc
+
+# env & secrets
+.env
+.env.*
+!.env.example
+
+# infrastructure
+coverage/
+*.log
+.DS_Store
