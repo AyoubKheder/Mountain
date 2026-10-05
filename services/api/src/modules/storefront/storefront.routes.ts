@@ -7,7 +7,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { wrap } from '../../core/context.js';
 import { ApiError } from '../../core/errors.js';
-import { getStoreBySlug } from '../stores/stores.service.js';
+import { getStoreBySlug, listPublishedStores } from '../stores/stores.service.js';
 import {
   listStorefrontProducts,
   isProductVisibleForStore,
@@ -19,6 +19,43 @@ import { checkAvailability } from '../inventory/inventory.service.js';
 import { placeOrder, checkoutSettings } from '../checkout/checkout.service.js';
 
 export const storefrontModule = Router();
+
+/**
+ * 0. Marketplace listing — every store that opted into public discovery.
+ *
+ * Only published stores appear, and only their public profile: never tenant ids,
+ * settings or unpublished data. Product counts are computed live so the
+ * marketplace never shows a stale catalogue size.
+ */
+storefrontModule.get(
+  '/stores',
+  wrap(async (req, res) => {
+    const search = typeof req.query.search === 'string' ? req.query.search.toLowerCase() : undefined;
+    const category = typeof req.query.category === 'string' ? req.query.category.toLowerCase() : undefined;
+
+    let items = await listPublishedStores();
+
+    if (category && category !== 'all') {
+      items = items.filter((store) => (store.industry ?? '').toLowerCase() === category);
+    }
+    if (search) {
+      items = items.filter((store) =>
+        `${store.name} ${store.industry ?? ''} ${store.description ?? ''}`
+          .toLowerCase()
+          .includes(search),
+      );
+    }
+
+    const withCounts = await Promise.all(
+      items.map(async (store) => ({
+        ...store,
+        productCount: (await listStorefrontProducts(store.tenantId, store.id)).length,
+      })),
+    );
+
+    res.json({ items: withCounts, total: withCounts.length });
+  }),
+);
 
 /**
  * 1. Resolve Store by slug

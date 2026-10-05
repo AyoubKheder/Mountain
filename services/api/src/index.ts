@@ -17,6 +17,7 @@ import { storesModule } from './modules/stores/stores.routes.js';
 import { productsModule } from './modules/products/products.routes.js';
 import { categoriesModule } from './modules/categories/categories.routes.js';
 import { inventoryModule } from './modules/inventory/inventory.routes.js';
+import { startReservationSweeper } from './modules/inventory/reservation.sweeper.js';
 import { ordersModule } from './modules/orders/orders.routes.js';
 import { customersModule } from './modules/customers/customers.routes.js';
 import { cartModule } from './modules/cart/cart.routes.js';
@@ -86,6 +87,11 @@ async function main(): Promise<void> {
   app.listen(config.port, () => {
     console.log(`[mountain-api] listening on :${config.port} (${config.env})`);
   });
+
+  // A stock hold that nobody ever releases is a permanent stock loss, so the
+  // expiry sweep runs for the lifetime of the process rather than being tied to
+  // a request. Idempotent and failure-tolerant; see reservation.sweeper.ts.
+  startReservationSweeper();
 
   // Connect to dependencies after listening so the service reports degraded
   // health instead of failing to boot (e.g. transient DB outages).

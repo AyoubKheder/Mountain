@@ -9,7 +9,7 @@
 | Path | Purpose |
 | --- | --- |
 | `apps/merchant` | Merchant dashboard (React + TypeScript) |
-| `apps/storefront` | Public stores (Next.js) |
+| `apps/storefront` | Public marketplace + stores (Next.js), fully API-driven |
 | `apps/admin` | Platform admin (React + TypeScript) |
 | `apps/mobile` | Flutter mobile apps (merchant + customer) |
 | `services/api` | Modular-monolith backend (Node.js + NestJS-style) |
@@ -30,15 +30,30 @@ npm run dev -w services/api # API on :4000
 MongoDB and Redis are optional: the API boots without them and falls back to
 in-memory persistence, with `/health/ready` reporting `degraded`.
 
+## Demo data
+
+The storefront reads everything from the API, so it needs real stores behind it:
+
+```bash
+npm run dev -w services/api        # API on :4000
+npm run seed:demo                  # 6 merchants, stores, products and themes (idempotent)
+npm run dev -w apps/storefront     # marketplace on :3000
+```
+
+Demo merchants all use the password `DemoMerchant123!`. The storefront proxies
+`/api/**` to `API_URL` (default `http://localhost:4000`), so the browser never
+talks to the API host directly — which is what makes it work behind a proxy.
+
 ## Tests
 
-Three executable suites, no test framework required. Each boots the API on a
+Four executable suites, no test framework required. Each boots the API on a
 scratch port and exits non-zero on failure, so they work as CI gates.
 
 ```bash
-npm run test:smoke      # end-to-end: auth → tenant → product → order → payment → refund
-npm run test:tenancy    # multi-tenant isolation (must hold on every change)
-npm run test:commerce   # commerce invariants: no overselling, idempotency, server-side pricing
+npm run test:smoke         # end-to-end: auth → tenant → product → order → payment → refund
+npm run test:tenancy       # multi-tenant isolation (must hold on every change)
+npm run test:commerce      # commerce invariants: no overselling, idempotency, cart, pricing
+npm run test:reservations  # expired holds return their stock and close the abandoned order
 ```
 
 ## Documentation

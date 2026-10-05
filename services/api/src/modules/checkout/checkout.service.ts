@@ -56,8 +56,14 @@ export type CheckoutProvider = (typeof ALL_PROVIDERS)[number];
 /** `NONE` records an order without taking payment (phone, manual, invoice). */
 export type OrderPaymentProvider = CheckoutProvider | 'NONE';
 
-/** Cash on delivery settles days later, so its stock hold lives much longer. */
-const COD_RESERVATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * Cash on delivery settles days later, so its stock hold lives much longer.
+ * Overridable so short-lived holds can be exercised in tests.
+ */
+const COD_RESERVATION_TTL_MS =
+  Number(process.env.COD_RESERVATION_TTL_MS) > 0
+    ? Number(process.env.COD_RESERVATION_TTL_MS)
+    : 7 * 24 * 60 * 60 * 1000;
 
 export interface CheckoutItem {
   productId: string;

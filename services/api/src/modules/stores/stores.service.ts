@@ -53,6 +53,67 @@ export async function listStores(tenantId: string): Promise<StoreRecord[]> {
   return [...stores.values()].filter((s) => s.tenantId === tenantId);
 }
 
+/**
+ * Public marketplace listing: stores that opted into discovery, with only their
+ * public profile exposed.
+ */
+export interface PublicStore {
+  id: string;
+  tenantId: string;
+  name: string;
+  slug: string;
+  industry?: string;
+  description?: string;
+  defaultCurrency: string;
+  defaultLocale: string;
+  themeSettings?: StoreRecord['themeSettings'];
+  createdAt: string;
+}
+
+export async function listPublishedStores(): Promise<PublicStore[]> {
+  const toPublic = (store: StoreRecord): PublicStore => ({
+    id: store.id,
+    tenantId: store.tenantId,
+    name: store.name,
+    slug: store.slug,
+    industry: store.industry,
+    description: store.description,
+    defaultCurrency: store.defaultCurrency,
+    defaultLocale: store.defaultLocale,
+    themeSettings: store.themeSettings,
+    createdAt: store.createdAt,
+  });
+
+  if (isMongoConnected()) {
+    const docs = await StoreModel.find({ published: true }).sort({ createdAt: -1 });
+    if (docs.length > 0) {
+      return docs.map((doc) =>
+        toPublic({
+          id: doc._id.toString(),
+          tenantId: doc.tenantId,
+          name: doc.name,
+          slug: doc.slug,
+          industry: doc.industry,
+          description: doc.description,
+          defaultCurrency: doc.defaultCurrency,
+          defaultLocale: doc.defaultLocale,
+          published: doc.published,
+          taxRate: doc.taxRate ?? 0,
+          shippingFlatRate: doc.shippingFlatRate ?? 0,
+          customDomains: doc.customDomains,
+          themeSettings: doc.themeSettings,
+          createdAt: doc.createdAt.toISOString(),
+        }),
+      );
+    }
+  }
+
+  return [...stores.values()]
+    .filter((store) => store.published)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .map(toPublic);
+}
+
 export async function getStoreBySlug(slug: string): Promise<StoreRecord | undefined> {
   const normalizedSlug = slug.toLowerCase().trim();
   if (isMongoConnected()) {

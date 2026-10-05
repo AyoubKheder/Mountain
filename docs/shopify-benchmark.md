@@ -167,10 +167,11 @@ Légende : ✅ fait · 🟡 partiel · ❌ manquant
 
 ---
 
-## 5. Les quatre invariants que Mountain ne respecte pas encore
+## 5. Les quatre invariants du commerce
 
 Ce sont les points sur lesquels les sources convergent comme étant *les* problèmes difficiles du
-commerce en ligne — et ce sont exactement nos trous.
+commerce en ligne. Ils étaient nos quatre trous ; ils sont maintenant tenus **et vérifiés par un
+test** — la colonne « Preuve » donne la commande qui échoue si l'invariant casse.
 
 ### 5.1 Ne jamais survendre
 
@@ -182,7 +183,16 @@ Vendre un article sans stock est le bug le plus coûteux d'une boutique. Deux st
   `réservé` −= 1), l'expiration ou l'échec libère. La contrainte `réservé ≤ stock` est le dernier
   rempart. Pour un panier multi-lignes, la réservation est **tout ou rien** dans une transaction.
 
-Échec à Mountain aujourd'hui : stock jamais lu, jamais décrémenté.
+**État Mountain** : `available = stock − réservé`. Le hold est pris par une mise à jour
+conditionnelle atomique (`$expr: { $gte: [{ $subtract: ['$stock','$reserved'] }, qty] }`) — le test et
+l'écriture sont une seule opération, donc deux checkouts simultanés du dernier exemplaire ne peuvent
+pas réussir tous les deux. Réservation multi-lignes **tout ou rien**, verrous acquis dans un ordre
+déterministe, libération complète en cas d'échec. TTL de 15 min (7 jours en paiement à la livraison)
+avec balayage périodique qui rend le stock **et** ferme la commande abandonnée.
+
+*Preuve* : `npm run test:commerce` (« two simultaneous checkouts of the last unit: exactly one
+wins », « a refused checkout leaves no order »), `npm run test:reservations` (TTL → stock rendu →
+commande annulée).
 
 ### 5.2 Idempotence
 
@@ -190,21 +200,36 @@ Un double-clic, un retry réseau ou un webhook rejoué (Stripe réessaie) ne doi
 commandes ni décrémenter deux fois. La parade standard est la **clé d'idempotence** fournie par le
 client, mémorisée avec la réponse.
 
-Échec à Mountain : deux checkouts identiques créent deux commandes et deux paiements.
+**État Mountain** : l'en-tête `Idempotency-Key` est mémorisé avec la réponse ; rejouer la même clé
+renvoie le **même** `orderId` et le même paiement (`replayed: true`) au lieu de vendre deux fois. Les
+webhooks sont idempotents par construction : commit et release sont indexés par `orderId` et ne font
+rien s'ils ont déjà été appliqués.
+
+*Preuve* : `npm run test:commerce` (« retry replays instead of reselling », « a replayed retry does
+not decrement stock twice »).
 
 ### 5.3 Le panier est persistant
 
 Un panier qui disparaît avec la session perd du chiffre d'affaires. Il doit survivre au rechargement,
 se retrouver sur un autre appareil, et fusionner à la connexion.
 
-Échec à Mountain : pas de panier du tout.
+**État Mountain** : le panier est un objet serveur, identifié par son `id` — l'`id` *est* la
+capacité, aucun jeton marchand n'est nécessaire côté acheteur. Il survit au rechargement, il est
+borné par le stock réel à chaque écriture, il expire au bout de 30 jours et se réclame
+(`POST …/claim`) quand l'acheteur s'authentifie.
+
+*Preuve* : `npm run test:commerce`, bloc « Panier persistant » — création anonyme, refus au-delà du
+stock, rechargement, totaux, checkout depuis le panier, panier consommé, réclamation idempotente.
 
 ### 5.4 Le client est une entité
 
 Sans enregistrement client, pas d'historique de commandes, pas de relance de panier abandonné, pas
 de segmentation, pas de fidélité — c'est-à-dire pas de rétention.
 
-Échec à Mountain : `customerEmail` est accepté puis oublié.
+**État Mountain** : le client est créé (ou retrouvé par e-mail) au checkout, avec adresse,
+historique de commandes et LTV dans `modules/customers`.
+
+*Preuve* : `npm run test:commerce` (historique alimenté par le checkout, LTV servie par l'API).
 
 ---
 
@@ -215,7 +240,7 @@ délivrent réellement les plateformes étudiées :
 
 | Niveau | Nom | Contenu | Mountain aujourd'hui |
 | --- | --- | --- | --- |
-| **L1** | **Boutique qui vend** | Catalogue · stock · panier · checkout idempotent · paiement · commande · client | 🟡 ~40 % (paiement réel et stock manquants) |
+| **L1** | **Boutique qui vend** | Catalogue · stock · panier · checkout idempotent · paiement · commande · client | ✅ **Atteint** (voir §7) |
 | **L2** | **Plateforme marchande** | L1 + thèmes · domaines · livraison · taxes · remises · avis · notifications · analytics · admin plateforme · facturation | ❌ ~5 % |
 | **L3** | **Échelle** | L2 + recherche · événements/webhooks · multi-entrepôt · multi-devise · CI/CD · observabilité | ❌ ~5 % |
 | **L4** | **IA & canaux** | L3 + génération de contenu · assistant analytics · recommandations · prévisions · mobile · canaux agentiques | ❌ ~2 % |
@@ -239,9 +264,9 @@ code ne soutient pas. Le premier objectif honnête est donc **atteindre L1 réel
 | --- | --- | --- | --- |
 | A1 | **Inventaire** : stock par variante, réservations TTL, décrément atomique, disponible = stock − réservé, alertes de stock bas | ✅ **Fait** | `modules/inventory` — hold tout-ou-rien, commit/release idempotents, `GET /api/inventory/low-stock` |
 | A2 | **Checkout durci** : réservation tout-ou-rien, clé d'idempotence, création client, refus explicite des providers non implémentés, taxes/livraison configurables | ✅ **Fait** | `modules/checkout` — `Idempotency-Key`, réservation avant création, 501 sur STRIPE |
-| A3 | **Panier** : objet persistant, lignes add/update/remove, identité acheteur, fusion à la connexion, validation du stock | ❌ **À faire** | Le modèle `cart.model.ts` existe, le service non |
+| A3 | **Panier** : objet persistant, lignes add/update/remove, identité acheteur, fusion à la connexion, validation du stock | ✅ **Fait** | `modules/cart` + `modules/storefront/cart.routes.ts` — panier serveur identifié par son `id`, TTL 30 j, validation du stock au niveau de la ligne, `claim` à la connexion (idempotent) |
 | A4 | **Clients** : enregistrement, adresses, historique de commandes | ✅ **Fait** | `modules/customers` — upsert par e-mail, historique, LTV |
-| A5 | **Persistance** : commandes et paiements en Mongo, lectures cohérentes | 🟡 **Partiel** | Commandes, clients et inventaire persistés ; les paiements restent en mémoire |
+| A5 | **Persistance** : commandes et paiements en Mongo, lectures cohérentes | ✅ **Fait** | Commandes, clients, inventaire **et paiements** persistés (`payment.model.ts` branché) ; providers choisis par configuration |
 | A6 | **Corrections restantes** de l'analyse (#3, #4, #5) | ✅ **Fait** | Lectures Mongo, rotation + révocation des refresh tokens, chargement `.env` |
 
 **Preuves** : `npm run test:commerce` vérifie les invariants du §5 sur le chemin HTTP réel —
@@ -259,17 +284,38 @@ code ne soutient pas. Le premier objectif honnête est donc **atteindre L1 réel
 ✓ tax/shipping come from store settings, client ignored
 ```
 
-### 🎯 Track A bis — finir L1
+### 🎯 Track A bis — finir L1 (terminé)
 
-Ce qui reste avant de pouvoir dire « une boutique peut vendre » :
+Les cinq chantiers qui séparaient Mountain d'une boutique qui vend réellement :
 
-1. **Panier** (A3) — la brique qui manque au modèle Shopify.
-2. **Paiements persistés** (A5) — `payment.model.ts` existe, il n'est pas branché.
-3. **Traitement d'expiration** — `releaseExpiredReservations()` existe mais n'est appelé
-   par aucun planificateur ; le worker doit le déclencher.
-4. **Provider Stripe réel** — l'abstraction est prête, l'implémentation non.
-5. **Storefront connecté à l'API** (analyse #7) — sans ça, rien de tout cela n'est visible
-   par un acheteur.
+| # | Chantier | État | Ce qui a été fait |
+| --- | --- | --- | --- |
+| A3 | **Panier** | ✅ | Panier serveur (`modules/cart` + routes storefront) : lignes, quantités bornées par le stock réel, TTL 30 jours, `claim` à la connexion, `quantity: 0` retire la ligne |
+| A5 | **Paiements persistés** | ✅ | `payment.model.ts` branché : chaque tentative est écrite en Mongo, `clientSecret` transmis au navigateur, statut relu depuis la base |
+| A1′ | **Expiration des réservations** | ✅ | `reservation.sweeper.ts` : balayage périodique (`RESERVATION_SWEEP_INTERVAL_MS`, 60 s par défaut) qui libère les holds expirés **et** ferme les commandes orphelines |
+| A2′ | **Provider Stripe réel** | ✅ | `stripe.provider.ts` (REST, sans SDK) + webhook signé `POST /api/payments/webhooks/stripe` ; Stripe n'est enregistré que si `STRIPE_SECRET_KEY` est présent |
+| A2″ | **Storefront branché** | ✅ | Marketplace, fiche boutique, fiche produit, panier et checkout lus/écrits via l'API (`/api/**` proxifié par Next) ; « Open a store » crée un vrai marchand |
+
+**Un bug réel corrigé au passage** : la libération opportuniste des holds (déclenchée par une lecture
+d'inventaire) rendait le stock **sans** fermer la commande — une commande impayée restait `PENDING`
+pour toujours. Stock et état de commande sont désormais mis à jour dans la même passe, quel que soit
+le déclencheur (route ou planificateur).
+
+**Preuves ajoutées** : `npm run test:commerce` couvre le panier (création anonyme, bornage par le
+stock, persistance après rechargement, checkout depuis le panier, panier consommé, réclamation
+idempotente) et `npm run test:reservations` prouve l'expiration de bout en bout :
+
+```
+✓ cash-on-delivery order placed
+✓ stock is held while the order waits for payment (2 reserved)
+✓ expired hold was released automatically (reserved back to 0)
+✓ the units are sellable again (available back to 3)
+✓ stock was not decremented — nothing was sold
+✓ the abandoned order was cancelled by the sweeper
+✓ the timeline explains why
+✓ sweeping again is idempotent (still 3 available, 0 reserved)
+✓ the released units can now be bought (3 added to a cart)
+```
 
 ### 🎯 Track B — « Plateforme marchande » (L2)
 
@@ -292,8 +338,23 @@ recommandations · prévisions de stock · applications mobiles · canaux agenti
 ### Fil conducteur : le storefront
 
 À chaque track, **le storefront doit rester connecté à l'API** — c'est ce qui transforme la
-démonstration en produit. Aujourd'hui il écrit dans `localStorage` et affiche un catalogue codé en
-dur : le plus beau parcours du dépôt ne crée rien de réel.
+démonstration en produit.
+
+C'est désormais le cas : plus rien n'est codé en dur ni stocké dans `localStorage`.
+
+| Écran | Source | Écriture |
+| --- | --- | --- |
+| Marketplace `/` | `GET /api/storefront/stores` | — |
+| Boutique `/store/[slug]` | `GET /api/storefront/stores/:slug` + `/products` | panier |
+| Produit `/store/[slug]/product/[productSlug]` | `GET …/products/:productSlug` | panier |
+| Panier `/store/[slug]/cart` | routes panier + checkout | commande |
+| Ouverture de boutique `/open-store` | — | `POST /api/auth/register` → `POST /api/tenants` → `PATCH /api/stores/:id` |
+
+Le navigateur n'appelle jamais l'API en direct (elle n'est pas sur sa machine) : les composants
+client utilisent des URL relatives `/api/**`, proxifiées côté serveur Next vers `API_URL`.
+
+**Reste ouvert pour L2+** : le thème choisi à l'ouverture de boutique est stocké et restitué
+(couleurs sur la fiche boutique), mais il n'y a pas encore d'éditeur de thème.
 
 ---
 

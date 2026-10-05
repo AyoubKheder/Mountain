@@ -14,8 +14,8 @@ import {
   adjustStock,
   viewOf,
   availableOf,
-  releaseExpiredReservations,
 } from './inventory.service.js';
+import { sweepExpiredReservations } from './reservation.sweeper.js';
 
 export const inventoryModule = Router();
 
@@ -74,12 +74,16 @@ inventoryModule.get(
   }),
 );
 
-/** Expired holds are released opportunistically, so stock never strands. */
+/**
+ * Expired holds are released opportunistically, so stock never strands — and
+ * the orders waiting on them are closed in the same pass, so stock and order
+ * state can never disagree.
+ */
 inventoryModule.get(
   '/:productId/:variantId',
   requirePermission('inventory.read'),
   wrap(async (req, res) => {
-    await releaseExpiredReservations();
+    await sweepExpiredReservations();
     const record = await getInventory(req.tenant!.tenantId, req.params.productId!, req.params.variantId!);
     if (!record) {
       throw new ApiError(404, 'No inventory record for this product variant');

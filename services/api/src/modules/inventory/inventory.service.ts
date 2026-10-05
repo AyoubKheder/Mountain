@@ -22,8 +22,20 @@ import { isMongoConnected } from '../../core/db.js';
 import { InventoryModel, InventoryReservationModel } from '../../core/models/index.js';
 import type { IInventory, IInventoryReservation } from '../../core/models/inventory.model.js';
 
+/**
+ * Reads a positive duration from the environment, falling back to a default.
+ * Configurable so short TTLs can be exercised in tests and long ones in staging
+ * without editing code — a hold that never expires is a silent stock leak.
+ */
+function durationFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 /** How long a checkout may hold stock before it is released. Matched to card payments. */
-export const DEFAULT_RESERVATION_TTL_MS = 15 * 60 * 1000;
+export const DEFAULT_RESERVATION_TTL_MS = durationFromEnv('RESERVATION_TTL_MS', 15 * 60 * 1000);
 
 export interface InventoryRecord {
   id: string;
@@ -543,17 +555,47 @@ async function persistReservationStatus(reservation: ReservationRecord): Promise
 }
 
 /**
- * Releases holds whose payment window elapsed, so abandoned checkouts do not
- * strand stock forever. The worker calls this on a schedule.
+ * Returns the units held by every checkout whose payment window has elapsed.
+ *
+ * Without this the `reserved` counter only ever grows: each abandoned checkout
+ * would permanently remove units from `available`, and enough of them would make
+ * a product look sold out while the shelves are full.
+ *
+ * This is the stock half of the janitor. Closing the orders behind those holds
+ * is a separate concern and lives in `reservation.sweeper.ts`; call
+ * `sweepExpiredReservations()` when you want both.
+ *
+ * Releasing is idempotent (a reservation already COMMITTED or RELEASED is left
+ * alone), so an overlapping or repeated call cannot double-release.
  */
-export async function releaseExpiredReservations(now = Date.now()): Promise<number> {
-  const expired = [...reservations.values()].filter(
-    (r) => r.status === 'HELD' && Date.parse(r.expiresAt) <= now,
-  );
-  for (const reservation of expired) {
-    await releaseReservation(reservation.id);
+export async function releaseExpiredReservations(now: Date = new Date()): Promise<ReservationRecord[]> {
+  const candidates = new Map<string, ReservationRecord>(reservations);
+
+  if (isMongoConnected()) {
+    try {
+      const docs = await InventoryReservationModel.find({
+        status: 'HELD',
+        expiresAt: { $lte: now },
+      });
+      for (const doc of docs) {
+        const record = toReservation(doc);
+        candidates.set(record.id, record);
+      }
+    } catch (err) {
+      console.warn('[inventory] reservation sweep query error:', (err as Error).message);
+    }
   }
-  return expired.length;
+
+  const expired: ReservationRecord[] = [];
+  for (const reservation of candidates.values()) {
+    if (reservation.status !== 'HELD') continue;
+    if (new Date(reservation.expiresAt).getTime() > now.getTime()) continue;
+
+    const released = await releaseReservation(reservation.id);
+    if (released && released.status === 'RELEASED') expired.push(released);
+  }
+
+  return expired;
 }
 
 /** Test helper. */

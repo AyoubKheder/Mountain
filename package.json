@@ -2,7 +2,7 @@
   "name": "mountain",
   "version": "0.1.0",
   "private": true,
-  "description": "Mountain \u2014 Advanced Multi-Tenant E-Commerce SaaS Platform",
+  "description": "Mountain — Advanced Multi-Tenant E-Commerce SaaS Platform",
   "license": "UNLICENSED",
   "workspaces": [
     "packages/*",
@@ -25,10 +25,12 @@
     "test:smoke": "node scripts/smoke.mjs",
     "test:tenancy": "node scripts/verify-tenancy.mjs",
     "test:commerce": "node scripts/verify-commerce.mjs",
+    "seed:demo": "node scripts/seed-demo.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "infra:up": "docker compose up -d",
-    "infra:down": "docker compose down"
+    "infra:down": "docker compose down",
+    "test:reservations": "node scripts/verify-reservations.mjs"
   },
   "devDependencies": {
     "typescript": "^5.6.0"
