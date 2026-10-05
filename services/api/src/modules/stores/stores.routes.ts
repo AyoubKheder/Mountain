@@ -27,6 +27,10 @@ const updateStoreSchema = z.object({
   defaultCurrency: z.string().length(3).optional(),
   defaultLocale: z.string().max(10).optional(),
   published: z.boolean().optional(),
+  /** Flat tax rate as a decimal fraction (0.19 = 19%). */
+  taxRate: z.number().min(0).max(1).optional(),
+  /** Flat shipping fee in the store currency. */
+  shippingFlatRate: z.number().min(0).optional(),
   themeSettings: z
     .object({
       themeId: z.string().optional(),

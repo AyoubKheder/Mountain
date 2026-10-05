@@ -7,7 +7,13 @@ import { newId } from '@mountain/utils';
 import type { Money, PaymentStatus } from '@mountain/types';
 import { ApiError } from '../../core/errors.js';
 import { getPaymentProvider } from './payments.provider.js';
-import { orders } from '../orders/orders.service.js';
+import {
+  getOrder,
+  setPaymentStatus,
+  transitionOrder,
+  addTimelineNote,
+} from '../orders/orders.service.js';
+import { commitReservation } from '../inventory/inventory.service.js';
 
 export interface PaymentRecord {
   id: string;
@@ -51,16 +57,19 @@ export async function createPayment(input: {
   record.status = result.status;
 
   if (result.status === 'SUCCEEDED') {
-    const order = orders.get(input.orderId);
-    if (order && order.tenantId === input.tenantId) {
+    const order = await getOrder(input.tenantId, input.orderId);
+    if (order) {
+      // Convert the checkout's stock hold into a real decrement. Both calls are
+      // idempotent, so a replayed payment webhook cannot double-decrement.
+      await commitReservation(order.id);
+      setPaymentStatus(order.id, 'PAID', record.id);
       if (order.status === 'PENDING') {
-        order.status = 'CONFIRMED';
-        order.timeline.push({
-          status: 'CONFIRMED',
-          at: new Date().toISOString(),
-          note: `Payment confirmed via ${input.providerId} (${result.providerRef})`,
-        });
-        order.updatedAt = new Date().toISOString();
+        await transitionOrder(
+          input.tenantId,
+          order.id,
+          'CONFIRMED',
+          `Payment confirmed via ${input.providerId} (${result.providerRef})`,
+        );
       }
     }
   }
@@ -91,6 +100,14 @@ export async function refundPayment(input: {
   }
   const result = await provider.refundPayment(record.providerRef, input.amount ?? record.amount);
   record.status = result.status;
+  setPaymentStatus(record.orderId, 'REFUNDED', record.id);
+  addTimelineNote(
+    record.orderId,
+    `Refunded ${input.amount ? input.amount.amount : record.amount.amount} ${record.amount.currency} via ${record.provider}`,
+    'REFUNDED',
+  );
+  // Restocking on refund is a merchant policy, not an automatic rule: a returned
+  // item may be unsellable. Merchants adjust stock explicitly via /api/inventory.
   return record;
 }
 

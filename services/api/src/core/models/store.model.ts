@@ -10,6 +10,10 @@ export interface IStore {
   defaultCurrency: string;
   defaultLocale: string;
   published: boolean;
+  /** Flat rate applied to order subtotals at checkout. Server-side only. */
+  taxRate: number;
+  /** Flat shipping fee in the store currency. Server-side only. */
+  shippingFlatRate: number;
   customDomains: Array<{
     hostname: string;
     verified: boolean;
@@ -40,6 +44,8 @@ const StoreSchema = new Schema<IStore>(
     defaultCurrency: { type: String, default: 'USD', uppercase: true },
     defaultLocale: { type: String, default: 'en' },
     published: { type: Boolean, default: false, index: true },
+    taxRate: { type: Number, default: 0, min: 0, max: 1 },
+    shippingFlatRate: { type: Number, default: 0, min: 0 },
     customDomains: [
       {
         hostname: { type: String, required: true, lowercase: true, trim: true },

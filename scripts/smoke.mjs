@@ -124,6 +124,17 @@ try {
   });
   assert(activated.json?.status === 'ACTIVE', 'product activated for purchase');
 
+  // Inventory is the source of truth for stock; a new product starts at zero, so
+  // the merchant must declare what they actually have before anything can sell.
+  const variantId = product.json.variants[0].id;
+  assert(activated.json?.variants?.[0]?.stock === 0, 'new products start with zero stock');
+
+  const stocked = await api('PUT', `/api/inventory/${product.json.id}/${variantId}`, {
+    token,
+    body: { stock: 50, lowStockThreshold: 10 },
+  });
+  assert(stocked.status === 200 && stocked.json.available === 50, 'inventory stocked to 50 available');
+
   // 6. Create order
   const order = await api('POST', '/api/orders', {
     token,
@@ -170,6 +181,18 @@ try {
     body: { refreshToken: reg.json.refreshToken },
   });
   assert(refresh.status === 200 && refresh.json.accessToken, 'refresh token rotation works');
+
+  // The presented token is now spent; replaying it must be refused, and the
+  // attempt revokes the whole lineage.
+  const replay = await api('POST', '/api/auth/refresh', {
+    body: { refreshToken: reg.json.refreshToken },
+  });
+  assert(replay.status === 401, 'a replayed refresh token is rejected', `HTTP ${replay.status}`);
+
+  const rotated = await api('POST', '/api/auth/refresh', {
+    body: { refreshToken: refresh.json.refreshToken },
+  });
+  assert(rotated.status === 401, 'replay detection revokes the whole token family', `HTTP ${rotated.status}`);
 
   console.log(process.exitCode ? '\nSMOKE TEST FAILED' : '\nSMOKE TEST PASSED');
 } catch (err) {

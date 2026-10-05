@@ -13,6 +13,13 @@ import type {
 import { issueTokens, verifyRefreshToken, permissionsForRole } from '@mountain/auth';
 import { newId } from '@mountain/utils';
 import { ApiError } from '../../core/errors.js';
+import {
+  rememberSession,
+  consumeSession,
+  revokeFamily,
+  revokeUser,
+  resetRefreshStore,
+} from './refresh-store.js';
 
 export interface UserRecord {
   id: string;
@@ -153,6 +160,50 @@ export function getTenantMembership(userId: string, tenantId: string): TenantMem
   return memberships.get(`${userId}:${tenantId}`);
 }
 
+/** Reads through to Mongo first, so a user survives an API restart. */
+export async function findUserById(userId: string): Promise<UserRecord | undefined> {
+  if (isMongoConnected()) {
+    const doc = await UserModel.findOne({ _id: userId });
+    if (doc) {
+      const user: UserRecord = {
+        id: doc._id.toString(),
+        email: doc.email,
+        firstName: doc.firstName,
+        lastName: doc.lastName,
+        passwordHash: doc.passwordHash,
+        platformRole: doc.platformRole ?? undefined,
+        twoFactorEnabled: doc.twoFactorEnabled,
+        createdAt: doc.createdAt.toISOString(),
+      };
+      users.set(user.id, user);
+      usersByEmail.set(user.email, user.id);
+      return user;
+    }
+  }
+  const cached = users.get(userId);
+  return cached;
+}
+
+/** All tenants a user belongs to, from Mongo when available. */
+export async function listUserMemberships(userId: string): Promise<TenantMembership[]> {
+  if (isMongoConnected()) {
+    const docs = await TenantMembershipModel.find({ userId });
+    if (docs.length > 0) {
+      const found: TenantMembership[] = docs.map((doc) => ({
+        userId: doc.userId,
+        tenantId: doc.tenantId,
+        role: doc.role,
+        explicitPermissions: doc.explicitPermissions ?? [],
+      }));
+      for (const membership of found) {
+        memberships.set(`${membership.userId}:${membership.tenantId}`, membership);
+      }
+      return found;
+    }
+  }
+  return [...memberships.values()].filter((m) => m.userId === userId);
+}
+
 function claimsFor(user: UserRecord, membership?: TenantMembership): AccessTokenClaims {
   const role = membership?.role ?? 'STAFF';
   const merchantPerms = membership ? permissionsForRole(role, membership.explicitPermissions) : [];
@@ -169,26 +220,72 @@ function claimsFor(user: UserRecord, membership?: TenantMembership): AccessToken
   };
 }
 
+/**
+ * Issues a session and registers its refresh token, so it can be rotated later.
+ */
 export async function createTokenPair(
   user: UserRecord,
   membership: TenantMembership | undefined,
   keys: AuthKeys,
 ): Promise<TokenPair> {
-  return issueTokens(claimsFor(user, membership), keys);
+  const issued = await issueTokens(claimsFor(user, membership), keys);
+
+  rememberSession({
+    jti: issued.refreshJti,
+    userId: user.id,
+    family: issued.refreshFamily,
+    expiresAt: issued.refreshExpiresAt,
+  });
+
+  return { accessToken: issued.accessToken, refreshToken: issued.refreshToken };
 }
 
+/**
+ * Rotates a refresh token: the presented token is spent and a new pair is issued
+ * into the same family. Presenting a token that was already spent means a copy
+ * is in circulation, so the entire lineage is revoked and the caller must log in
+ * again. Without this, a stolen refresh token is valid for its full lifetime.
+ */
 export async function rotateRefreshToken(
   refreshToken: string,
   keys: AuthKeys,
 ): Promise<TokenPair> {
-  const { sub } = await verifyRefreshToken(refreshToken, keys.refreshSecret);
-  const user = users.get(sub);
+  const { sub, jti, family } = await verifyRefreshToken(refreshToken, keys.refreshSecret);
+
+  const consumed = consumeSession(jti);
+  if (consumed.status === 'replay') {
+    const revoked = revokeFamily(family);
+    console.warn(
+      `[auth] refresh token replay detected for user ${sub}; revoked ${revoked} session(s) in the family`,
+    );
+    throw new ApiError(401, 'Refresh token reuse detected — all sessions have been revoked');
+  }
+  if (consumed.status === 'unknown') {
+    throw new ApiError(401, 'Refresh token is no longer valid');
+  }
+
+  const user = await findUserById(sub);
   if (!user) {
     throw new ApiError(401, 'Unknown user for refresh token');
   }
+
   // Pick the user's first membership; multi-tenant users will choose actively.
-  const membership = listTenantMemberships().find((m) => m.userId === sub);
-  return issueTokens(claimsFor(user, membership), keys);
+  const [membership] = await listUserMemberships(sub);
+  const issued = await issueTokens(claimsFor(user, membership), keys, { refreshFamily: family });
+
+  rememberSession({
+    jti: issued.refreshJti,
+    userId: user.id,
+    family: issued.refreshFamily,
+    expiresAt: issued.refreshExpiresAt,
+  });
+
+  return { accessToken: issued.accessToken, refreshToken: issued.refreshToken };
+}
+
+/** Logs a user out everywhere by revoking every lineage they hold. */
+export function revokeUserSessions(userId: string): number {
+  return revokeUser(userId);
 }
 
 /** Test/admin helper. */
@@ -196,6 +293,7 @@ export function resetAuthStore(): void {
   users.clear();
   usersByEmail.clear();
   memberships.clear();
+  resetRefreshStore();
 }
 
 export function listTenantMemberships(): TenantMembership[] {

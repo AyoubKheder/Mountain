@@ -5,3 +5,5 @@ export * from './product.model.js';
 export * from './order.model.js';
 export * from './payment.model.js';
 export * from './cart.model.js';
+export * from './inventory.model.js';
+export * from './customer.model.js';

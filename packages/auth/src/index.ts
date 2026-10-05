@@ -19,6 +19,16 @@ export interface TokenPair {
   refreshToken: string;
 }
 
+/**
+ * `issueTokens` also reports the refresh token's identity, so the caller can
+ * register it for rotation without decoding the token it just signed.
+ */
+export interface IssuedTokens extends TokenPair {
+  refreshJti: string;
+  refreshFamily: string;
+  refreshExpiresAt: number;
+}
+
 export interface AuthKeys {
   accessSecret: string;
   refreshSecret: string;
@@ -35,7 +45,8 @@ function key(secret: string): Uint8Array {
 export async function issueTokens(
   claims: AccessTokenClaims,
   keys: AuthKeys,
-): Promise<TokenPair> {
+  options: { refreshFamily?: string } = {},
+): Promise<IssuedTokens> {
   const now = Math.floor(Date.now() / 1000);
 
   const accessToken = await new SignJWT({ ...claims })
@@ -45,14 +56,26 @@ export async function issueTokens(
     .setExpirationTime(now + keys.accessTtlSeconds)
     .sign(key(keys.accessSecret));
 
-  const refreshToken = await new SignJWT({ sub: claims.sub, typ: 'refresh' })
+  // `jti` makes each refresh token individually revocable; `fam` groups every
+  // token descended from one login, so a detected replay can revoke the whole
+  // lineage rather than just the stolen token.
+  const refreshJti = crypto.randomUUID();
+  const refreshFamily = options.refreshFamily ?? crypto.randomUUID();
+  const refreshExpiresAt = (now + keys.refreshTtlSeconds) * 1000;
+
+  const refreshToken = await new SignJWT({
+    sub: claims.sub,
+    typ: 'refresh',
+    jti: refreshJti,
+    fam: refreshFamily,
+  })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt(now)
     .setIssuer('mountain')
     .setExpirationTime(now + keys.refreshTtlSeconds)
     .sign(key(keys.refreshSecret));
 
-  return { accessToken, refreshToken };
+  return { accessToken, refreshToken, refreshJti, refreshFamily, refreshExpiresAt };
 }
 
 export async function verifyAccessToken(
@@ -73,15 +96,35 @@ export async function verifyAccessToken(
   };
 }
 
+export interface RefreshTokenClaims {
+  sub: string;
+  /** Unique id of this refresh token — the revocable unit. */
+  jti: string;
+  /** Login lineage this token belongs to. */
+  family: string;
+  /** Epoch milliseconds at which the token expires. */
+  expiresAt: number;
+}
+
 export async function verifyRefreshToken(
   token: string,
   refreshSecret: string,
-): Promise<{ sub: string }> {
+): Promise<RefreshTokenClaims> {
   const { payload } = await jwtVerify(token, key(refreshSecret), { issuer: 'mountain' });
-  if (payload.typ !== 'refresh' || typeof payload.sub !== 'string') {
+  if (
+    payload.typ !== 'refresh' ||
+    typeof payload.sub !== 'string' ||
+    typeof payload.jti !== 'string' ||
+    typeof payload.fam !== 'string'
+  ) {
     throw new Error('Invalid refresh token');
   }
-  return { sub: payload.sub };
+  return {
+    sub: payload.sub,
+    jti: payload.jti,
+    family: payload.fam,
+    expiresAt: typeof payload.exp === 'number' ? payload.exp * 1000 : Date.now(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -96,11 +139,18 @@ export async function verifyRefreshToken(
  */
 const ROLE_BASE_PERMISSIONS: Record<string, string[]> = {
   OWNER: ['*'],
-  MANAGER: ['products.*', 'orders.*', 'customers.read', 'analytics.read', 'stores.*'],
-  STAFF: ['products.read', 'orders.read', 'orders.update', 'stores.read'],
+  MANAGER: [
+    'products.*',
+    'orders.*',
+    'customers.*',
+    'inventory.*',
+    'analytics.read',
+    'stores.*',
+  ],
+  STAFF: ['products.read', 'orders.read', 'orders.update', 'inventory.read', 'stores.read'],
   ACCOUNTANT: ['orders.read', 'payments.read', 'analytics.read', 'stores.read'],
-  MARKETING: ['discounts.*', 'products.read', 'analytics.read', 'stores.read'],
-  FULFILLMENT: ['orders.read', 'orders.update', 'inventory.read', 'stores.read'],
+  MARKETING: ['discounts.*', 'products.read', 'analytics.read', 'customers.read', 'stores.read'],
+  FULFILLMENT: ['orders.read', 'orders.update', 'inventory.*', 'stores.read'],
   CUSTOMER_SUPPORT: ['orders.read', 'customers.read', 'reviews.*', 'stores.read'],
 };
 

@@ -7,6 +7,7 @@ import { newId, slugify, generateSku, money } from '@mountain/utils';
 import type { Product } from '@mountain/types';
 import { isMongoConnected } from '../../core/db.js';
 import { ProductModel, type IProduct } from '../../core/models/index.js';
+import { seedInventory } from '../inventory/inventory.service.js';
 
 export interface ProductVariantItem {
   id: string;
@@ -90,7 +91,9 @@ export async function createProduct(input: CreateProductInput): Promise<ProductR
         sku,
         price: money(input.price, currency),
         options: {},
-        stock: 10,
+        // A new product starts at zero: stock is declared by the merchant,
+        // never invented by the platform.
+        stock: 0,
       },
     ];
 
@@ -116,6 +119,19 @@ export async function createProduct(input: CreateProductInput): Promise<ProductR
   };
 
   products.set(product.id, product);
+
+  // Inventory is the source of truth for stock: every variant gets a record,
+  // seeded with the quantity the merchant declared when creating the product.
+  for (const variant of formattedVariants) {
+    await seedInventory({
+      tenantId: product.tenantId,
+      productId: product.id,
+      variantId: variant.id,
+      sku: variant.sku,
+      storeId: product.storeId,
+      stock: variant.stock ?? 0,
+    });
+  }
 
   if (isMongoConnected()) {
     try {

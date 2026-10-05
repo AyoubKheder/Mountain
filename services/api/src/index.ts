@@ -2,6 +2,10 @@
  * Mountain API — modular monolith entrypoint.
  */
 
+// Must stay the first import: it loads `.env` before the route modules below
+// read configuration at import time.
+import './env.js';
+
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';

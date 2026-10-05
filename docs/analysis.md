@@ -433,14 +433,31 @@ bout-en-bout — d'où l'importance de la recommandation CI ci-dessous.
 | --- | --- | --- | --- |
 | 1 | Fuite catalogue inter-tenants | 🔴 Critique | ✅ **Corrigé** |
 | 2 | Écriture inter-tenants sur les boutiques | 🔴 Critique | ✅ **Corrigé** |
-| 3 | `me` / `tenants/:id` ne lisent jamais Mongo | 🟠 Élevé | ❌ Ouvert |
-| 4 | Refresh tokens ni rotés ni révoqués | 🟠 Élevé | ❌ Ouvert |
-| 5 | `npm run dev` plante (pas de chargement `.env`) | 🟠 Élevé | ❌ Ouvert |
-| 6 | Checkout : ni stock, ni idempotence, ni client | 🟠 Élevé | ❌ Ouvert |
-| 7 | Storefront décorrélé de l'API | 🟡 Moyen | ❌ Ouvert |
-| 8 | Argent en flottants | 🟡 Moyen | ❌ Ouvert |
-| 9 | Double source de vérité Mongo/mémoire | 🟡 Moyen | ❌ Ouvert |
-| 10 | Divers (CI, lint, MinIO, tests) | 🔵 Faible | ❌ Ouvert |
+| 3 | `me` / `tenants/:id` ne lisent jamais Mongo | 🟠 Élevé | ✅ **Corrigé** |
+| 4 | Refresh tokens ni rotés ni révoqués | 🟠 Élevé | ✅ **Corrigé** |
+| 5 | `npm run dev` plante (pas de chargement `.env`) | 🟠 Élevé | ✅ **Corrigé** |
+| 6 | Checkout : ni stock, ni idempotence, ni client | 🟠 Élevé | ✅ **Corrigé** |
+| 7 | Storefront décorrélé de l'API | 🟡 Moyen | ❌ Ouvert (Track B) |
+| 8 | Argent en flottants | 🟡 Moyen | ❌ Ouvert (Track C) |
+| 9 | Double source de vérité Mongo/mémoire | 🟡 Moyen | 🟡 Atténué — l'inventaire et les commandes sont persistés ; le reste subsiste |
+| 10 | Divers (CI, lint, MinIO, tests) | 🔵 Faible | 🟡 3 suites de tests existent ; la CI reste à brancher |
+
+### Détail des correctifs #3 à #6
+
+- **#3** `findUserById()` et `listUserMemberships()` lisent Mongo en premier, et
+  `findTenant()` fait de même : un utilisateur et son tenant survivent désormais à un
+  redémarrage de l'API.
+- **#4** Les refresh tokens portent un `jti` et un `fam` (lignée). Chaque token est
+  à usage unique ; rejouer un token déjà consommé révoque **toute la lignée** et renvoie
+  401. Un endpoint `POST /api/auth/logout` révoque toutes les sessions du compte.
+- **#5** `services/api/src/env.ts` charge `.env` via `process.loadEnvFile()` (Node 20.12+,
+  aucune dépendance) et est importé en premier dans `index.ts`, donc avant que les modules
+  de routes n'appellent `loadConfig()`. Le démarrage rapide du README fonctionne.
+- **#6** Nouveau module **inventaire** (`available = stock − réservé`, réservations
+  tout-ou-rien, TTL, libération automatique) et service de **checkout** (idempotence par
+  clé, création du client, refus explicite des providers non implémentés, taxes et
+  livraison calculées côté serveur depuis les réglages de la boutique). Voir
+  `docs/shopify-benchmark.md` §7 pour la suite du plan.
 
 ---
 

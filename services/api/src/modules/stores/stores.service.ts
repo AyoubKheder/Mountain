@@ -15,6 +15,8 @@ export interface StoreRecord {
   defaultCurrency: string;
   defaultLocale: string;
   published: boolean;
+  taxRate: number;
+  shippingFlatRate: number;
   customDomains?: Array<{ hostname: string; verified: boolean; sslActive: boolean }>;
   themeSettings?: {
     themeId?: string;
@@ -40,6 +42,8 @@ export async function listStores(tenantId: string): Promise<StoreRecord[]> {
         defaultCurrency: s.defaultCurrency,
         defaultLocale: s.defaultLocale,
         published: s.published,
+        taxRate: s.taxRate ?? 0,
+        shippingFlatRate: s.shippingFlatRate ?? 0,
         customDomains: s.customDomains,
         themeSettings: s.themeSettings,
         createdAt: s.createdAt.toISOString(),
@@ -64,6 +68,8 @@ export async function getStoreBySlug(slug: string): Promise<StoreRecord | undefi
         defaultCurrency: s.defaultCurrency,
         defaultLocale: s.defaultLocale,
         published: s.published,
+        taxRate: s.taxRate ?? 0,
+        shippingFlatRate: s.shippingFlatRate ?? 0,
         customDomains: s.customDomains,
         themeSettings: s.themeSettings,
         createdAt: s.createdAt.toISOString(),
@@ -96,6 +102,10 @@ export async function updateStore(
     if (patchValue.defaultCurrency !== undefined) allowed.defaultCurrency = patchValue.defaultCurrency;
     if (patchValue.defaultLocale !== undefined) allowed.defaultLocale = patchValue.defaultLocale;
     if (patchValue.published !== undefined) allowed.published = patchValue.published;
+    if (patchValue.taxRate !== undefined) allowed.taxRate = patchValue.taxRate;
+    if (patchValue.shippingFlatRate !== undefined) {
+      allowed.shippingFlatRate = patchValue.shippingFlatRate;
+    }
     if (patchValue.themeSettings !== undefined) allowed.themeSettings = patchValue.themeSettings;
     if (patchValue.customDomains !== undefined) allowed.customDomains = patchValue.customDomains;
     return allowed;
@@ -124,6 +134,8 @@ export async function updateStore(
       defaultCurrency: updated.defaultCurrency,
       defaultLocale: updated.defaultLocale,
       published: updated.published,
+      taxRate: updated.taxRate ?? 0,
+      shippingFlatRate: updated.shippingFlatRate ?? 0,
       customDomains: updated.customDomains,
       themeSettings: updated.themeSettings,
       createdAt: updated.createdAt.toISOString(),
