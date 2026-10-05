@@ -6,7 +6,7 @@
 import { newId, slugify, generateSku, money } from '@mountain/utils';
 import type { Product } from '@mountain/types';
 import { isMongoConnected } from '../../core/db.js';
-import { ProductModel } from '../../core/models/index.js';
+import { ProductModel, type IProduct } from '../../core/models/index.js';
 
 export interface ProductVariantItem {
   id: string;
@@ -169,26 +169,7 @@ export async function listProducts(
     ]);
 
     if (docs.length > 0 || total > 0) {
-      const items: ProductRecord[] = docs.map((p) => ({
-        id: p._id.toString(),
-        tenantId: p.tenantId,
-        storeId: p.storeId,
-        title: p.title,
-        slug: p.slug,
-        description: p.description,
-        brand: p.brand,
-        categoryIds: p.categoryIds,
-        tags: p.tags,
-        price: p.price,
-        sku: p.sku,
-        status: p.status,
-        options: p.options,
-        variants: p.variants as ProductVariantItem[],
-        media: p.media,
-        seo: p.seo,
-        createdAt: p.createdAt.toISOString(),
-        updatedAt: p.updatedAt.toISOString(),
-      }));
+      const items: ProductRecord[] = docs.map(toProductRecord);
       return { items, total, page: query.page, pageSize: query.pageSize };
     }
   }
@@ -219,26 +200,7 @@ export async function getProduct(tenantId: string, productId: string): Promise<P
   if (isMongoConnected()) {
     const doc = await ProductModel.findOne({ _id: productId, tenantId });
     if (doc) {
-      return {
-        id: doc._id.toString(),
-        tenantId: doc.tenantId,
-        storeId: doc.storeId,
-        title: doc.title,
-        slug: doc.slug,
-        description: doc.description,
-        brand: doc.brand,
-        categoryIds: doc.categoryIds,
-        tags: doc.tags,
-        price: doc.price,
-        sku: doc.sku,
-        status: doc.status,
-        options: doc.options,
-        variants: doc.variants as ProductVariantItem[],
-        media: doc.media,
-        seo: doc.seo,
-        createdAt: doc.createdAt.toISOString(),
-        updatedAt: doc.updatedAt.toISOString(),
-      };
+      return toProductRecord(doc);
     }
   }
   const product = products.get(productId);
@@ -318,43 +280,74 @@ export async function archiveProduct(tenantId: string, productId: string): Promi
   return true;
 }
 
+/** Maps a Mongoose product document onto the API record shape. */
+export function toProductRecord(doc: IProduct): ProductRecord {
+  return {
+    id: doc._id.toString(),
+    tenantId: doc.tenantId,
+    storeId: doc.storeId,
+    title: doc.title,
+    slug: doc.slug,
+    description: doc.description,
+    brand: doc.brand,
+    categoryIds: doc.categoryIds,
+    tags: doc.tags,
+    price: doc.price,
+    sku: doc.sku,
+    status: doc.status,
+    options: doc.options,
+    variants: doc.variants as ProductVariantItem[],
+    media: doc.media,
+    seo: doc.seo,
+    createdAt: doc.createdAt.toISOString(),
+    updatedAt: doc.updatedAt.toISOString(),
+  };
+}
+
+/**
+ * Single source of truth for "may this product appear on this storefront?".
+ *
+ * Applied identically to the MongoDB and in-memory paths so their semantics can
+ * never drift apart — that drift is what leaked one tenant's catalogue onto
+ * another tenant's store.
+ *
+ * A product is public for a store when it:
+ *  - belongs to the tenant that owns the store (mandatory — spec section 3), and
+ *  - is ACTIVE, and
+ *  - is either unbound (`storeId` unset) or explicitly bound to that very store.
+ */
+export function isProductVisibleForStore(
+  product: Pick<ProductRecord, 'tenantId' | 'storeId' | 'status'>,
+  tenantId: string,
+  storeId?: string,
+): boolean {
+  if (product.tenantId !== tenantId) return false;
+  if (product.status !== 'ACTIVE') return false;
+  if (storeId && product.storeId && product.storeId !== storeId) return false;
+  return true;
+}
+
 /**
  * Public catalog lookup for storefronts (no merchant JWT required).
+ *
+ * Tenant-scoped by construction: the caller must supply the owning tenant, and
+ * the optional `storeId` only narrows the result further.
  */
-export async function listStorefrontProducts(storeIdOrSlug: string): Promise<ProductRecord[]> {
+export async function listStorefrontProducts(
+  tenantId: string,
+  storeId?: string,
+): Promise<ProductRecord[]> {
   if (isMongoConnected()) {
-    const docs = await ProductModel.find({
-      $or: [{ storeId: storeIdOrSlug }, { tenantId: storeIdOrSlug }],
-      status: 'ACTIVE',
-    }).sort({ createdAt: -1 });
+    const docs = await ProductModel.find({ tenantId, status: 'ACTIVE' }).sort({ createdAt: -1 });
 
     if (docs.length > 0) {
-      return docs.map((doc) => ({
-        id: doc._id.toString(),
-        tenantId: doc.tenantId,
-        storeId: doc.storeId,
-        title: doc.title,
-        slug: doc.slug,
-        description: doc.description,
-        brand: doc.brand,
-        categoryIds: doc.categoryIds,
-        tags: doc.tags,
-        price: doc.price,
-        sku: doc.sku,
-        status: doc.status,
-        options: doc.options,
-        variants: doc.variants as ProductVariantItem[],
-        media: doc.media,
-        seo: doc.seo,
-        createdAt: doc.createdAt.toISOString(),
-        updatedAt: doc.updatedAt.toISOString(),
-      }));
+      return docs
+        .map(toProductRecord)
+        .filter((product) => isProductVisibleForStore(product, tenantId, storeId));
     }
   }
 
-  return [...products.values()].filter(
-    (p) =>
-      p.status === 'ACTIVE' &&
-      (!p.storeId || p.storeId === storeIdOrSlug || p.tenantId === storeIdOrSlug),
+  return [...products.values()].filter((product) =>
+    isProductVisibleForStore(product, tenantId, storeId),
   );
 }

@@ -73,34 +73,67 @@ export async function getStoreBySlug(slug: string): Promise<StoreRecord | undefi
   return [...stores.values()].find((s) => s.slug.toLowerCase() === normalizedSlug);
 }
 
+/**
+ * Updates a store owned by `tenantId`.
+ *
+ * Returns `undefined` when the store does not exist **or belongs to another
+ * tenant**, so callers surface a 404 and never let a merchant touch a foreign
+ * store. The tenant is validated on both persistence paths (spec section 3).
+ *
+ * `patch` is rebuilt as a whitelist: unknown keys (including `tenantId`) are
+ * dropped, and `slug` is not updatable here so store URLs stay stable.
+ */
 export async function updateStore(
   tenantId: string,
   storeId: string,
   patch: Partial<StoreRecord>,
 ): Promise<StoreRecord | undefined> {
-  const existing = stores.get(storeId);
-  const updated: StoreRecord = {
-    ...(existing ?? {
-      id: storeId,
-      tenantId,
-      name: patch.name ?? 'Store',
-      slug: patch.slug ?? 'store',
-      defaultCurrency: 'USD',
-      defaultLocale: 'en',
-      published: false,
-      createdAt: new Date().toISOString(),
-    }),
-    ...patch,
+  const narrow = (patchValue: Partial<StoreRecord>): Partial<StoreRecord> => {
+    const allowed: Partial<StoreRecord> = {};
+    if (patchValue.name !== undefined) allowed.name = patchValue.name;
+    if (patchValue.industry !== undefined) allowed.industry = patchValue.industry;
+    if (patchValue.description !== undefined) allowed.description = patchValue.description;
+    if (patchValue.defaultCurrency !== undefined) allowed.defaultCurrency = patchValue.defaultCurrency;
+    if (patchValue.defaultLocale !== undefined) allowed.defaultLocale = patchValue.defaultLocale;
+    if (patchValue.published !== undefined) allowed.published = patchValue.published;
+    if (patchValue.themeSettings !== undefined) allowed.themeSettings = patchValue.themeSettings;
+    if (patchValue.customDomains !== undefined) allowed.customDomains = patchValue.customDomains;
+    return allowed;
   };
-  stores.set(storeId, updated);
+
+  const clean = narrow(patch);
 
   if (isMongoConnected()) {
-    try {
-      await StoreModel.findOneAndUpdate({ _id: storeId, tenantId }, patch, { upsert: true, new: true });
-    } catch (err) {
-      console.warn('[stores] Mongo update error:', (err as Error).message);
-    }
+    const existing = await StoreModel.findOne({ _id: storeId, tenantId });
+    if (!existing) return undefined;
+
+    const updated = await StoreModel.findOneAndUpdate(
+      { _id: storeId, tenantId },
+      { $set: clean },
+      { new: true },
+    );
+    if (!updated) return undefined;
+
+    return {
+      id: updated._id.toString(),
+      tenantId: updated.tenantId,
+      name: updated.name,
+      slug: updated.slug,
+      industry: updated.industry,
+      description: updated.description,
+      defaultCurrency: updated.defaultCurrency,
+      defaultLocale: updated.defaultLocale,
+      published: updated.published,
+      customDomains: updated.customDomains,
+      themeSettings: updated.themeSettings,
+      createdAt: updated.createdAt.toISOString(),
+    };
   }
 
+  const existing = stores.get(storeId);
+  if (!existing || existing.tenantId !== tenantId) return undefined;
+
+  const updated: StoreRecord = { ...existing, ...clean };
+  stores.set(storeId, updated);
   return updated;
 }

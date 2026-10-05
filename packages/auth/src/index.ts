@@ -88,15 +88,20 @@ export async function verifyRefreshToken(
 // RBAC
 // ---------------------------------------------------------------------------
 
-/** Merchant roles always imply these extra permissions. */
+/**
+ * Merchant roles always imply these extra permissions.
+ *
+ * `stores.read` is granted to every operational role (the dashboard needs store
+ * metadata to render); only OWNER and MANAGER may mutate store settings.
+ */
 const ROLE_BASE_PERMISSIONS: Record<string, string[]> = {
   OWNER: ['*'],
-  MANAGER: ['products.*', 'orders.*', 'customers.read', 'analytics.read'],
-  STAFF: ['products.read', 'orders.read', 'orders.update'],
-  ACCOUNTANT: ['orders.read', 'payments.read', 'analytics.read'],
-  MARKETING: ['discounts.*', 'products.read', 'analytics.read'],
-  FULFILLMENT: ['orders.read', 'orders.update', 'inventory.read'],
-  CUSTOMER_SUPPORT: ['orders.read', 'customers.read', 'reviews.*'],
+  MANAGER: ['products.*', 'orders.*', 'customers.read', 'analytics.read', 'stores.*'],
+  STAFF: ['products.read', 'orders.read', 'orders.update', 'stores.read'],
+  ACCOUNTANT: ['orders.read', 'payments.read', 'analytics.read', 'stores.read'],
+  MARKETING: ['discounts.*', 'products.read', 'analytics.read', 'stores.read'],
+  FULFILLMENT: ['orders.read', 'orders.update', 'inventory.read', 'stores.read'],
+  CUSTOMER_SUPPORT: ['orders.read', 'customers.read', 'reviews.*', 'stores.read'],
 };
 
 export const PLATFORM_ROLE_PERMISSIONS: Record<string, string[]> = {

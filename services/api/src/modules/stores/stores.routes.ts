@@ -3,9 +3,10 @@ import { z } from 'zod';
 import { loadConfig } from '@mountain/config';
 import { authenticate } from '../../core/middleware/authenticate.js';
 import { resolveTenant } from '../../core/middleware/resolveTenant.js';
+import { requirePermission } from '../../core/middleware/requirePermission.js';
 import { wrap } from '../../core/context.js';
 import { ApiError } from '../../core/errors.js';
-import { listStores, updateStore, stores } from './stores.service.js';
+import { listStores, updateStore } from './stores.service.js';
 
 export const storesModule = Router();
 
@@ -13,6 +14,7 @@ storesModule.use(authenticate(loadConfig().jwt.accessSecret), resolveTenant);
 
 storesModule.get(
   '/',
+  requirePermission('stores.read'),
   wrap(async (req, res) => {
     const items = await listStores(req.tenant!.tenantId);
     res.json({ items });
@@ -52,11 +54,14 @@ const updateStoreSchema = z.object({
 
 storesModule.patch(
   '/:id',
+  requirePermission('stores.update'),
   wrap(async (req, res) => {
     const parsed = updateStoreSchema.safeParse(req.body);
     if (!parsed.success) {
       throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid store update payload');
     }
+    // Returns undefined for both "missing" and "owned by another tenant", so a
+    // merchant cannot distinguish — nor modify — a foreign store.
     const updated = await updateStore(req.tenant!.tenantId, req.params.id!, parsed.data);
     if (!updated) {
       throw new ApiError(404, 'Store not found');

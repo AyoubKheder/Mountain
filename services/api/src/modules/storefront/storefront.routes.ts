@@ -8,7 +8,11 @@ import { z } from 'zod';
 import { wrap } from '../../core/context.js';
 import { ApiError } from '../../core/errors.js';
 import { getStoreBySlug } from '../stores/stores.service.js';
-import { listStorefrontProducts, products } from '../products/products.service.js';
+import {
+  listStorefrontProducts,
+  isProductVisibleForStore,
+  products,
+} from '../products/products.service.js';
 import { createOrder, orders } from '../orders/orders.service.js';
 import { createPayment } from '../payments/payments.service.js';
 import { isMongoConnected } from '../../core/db.js';
@@ -61,11 +65,8 @@ storefrontModule.get(
     const search = typeof req.query.search === 'string' ? req.query.search.toLowerCase() : undefined;
     const category = typeof req.query.category === 'string' ? req.query.category.toLowerCase() : undefined;
 
-    // Fetch active products for this store or tenant
-    let items = await listStorefrontProducts(store.id);
-    if (items.length === 0) {
-      items = await listStorefrontProducts(store.tenantId);
-    }
+    // Tenant-scoped: the owning tenant is mandatory, the store only narrows it.
+    let items = await listStorefrontProducts(store.tenantId, store.id);
 
     if (search) {
       items = items.filter(
@@ -113,7 +114,8 @@ storefrontModule.get(
       const doc = await ProductModel.findOne({
         slug: productSlug!.toLowerCase(),
         status: 'ACTIVE',
-        $or: [{ storeId: store.id }, { tenantId: store.tenantId }],
+        tenantId: store.tenantId,
+        $or: [{ storeId: store.id }, { storeId: { $exists: false } }, { storeId: null }],
       });
       if (doc) {
         productDoc = {
@@ -136,8 +138,7 @@ storefrontModule.get(
       const match = [...products.values()].find(
         (p) =>
           p.slug.toLowerCase() === productSlug!.toLowerCase() &&
-          p.status === 'ACTIVE' &&
-          (!p.storeId || p.storeId === store.id || p.tenantId === store.tenantId),
+          isProductVisibleForStore(p, store.tenantId, store.id),
       );
       if (match) {
         productDoc = match as unknown as Record<string, unknown>;

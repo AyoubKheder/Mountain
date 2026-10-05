@@ -22,6 +22,8 @@
     "build": "npm run build --workspaces --if-present",
     "dev": "npm run dev --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "test:smoke": "node scripts/smoke.mjs",
+    "test:tenancy": "node scripts/verify-tenancy.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "infra:up": "docker compose up -d",
