@@ -13,7 +13,9 @@ export interface CreatePaymentInput {
 
 export interface PaymentProvider {
   readonly id: string;
-  createPayment(input: CreatePaymentInput): Promise<{ providerRef: string; status: PaymentStatus }>;
+  createPayment(
+    input: CreatePaymentInput,
+  ): Promise<{ providerRef: string; status: PaymentStatus; clientSecret?: string }>;
   capturePayment(providerRef: string): Promise<{ status: PaymentStatus }>;
   refundPayment(providerRef: string, amount: Money): Promise<{ status: PaymentStatus; refundRef: string }>;
   cancelPayment(providerRef: string): Promise<{ status: PaymentStatus }>;

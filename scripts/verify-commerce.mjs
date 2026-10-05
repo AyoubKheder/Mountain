@@ -209,7 +209,11 @@ try {
     body: checkoutBody(m3.productId, 1, { paymentProvider: 'STRIPE' }),
   });
   assert(stripe.status === 501, 'an unimplemented provider is refused loudly', `HTTP ${stripe.status}`);
-  assert((stripe.json?.error ?? '').includes('not implemented'), 'the error says what is missing', stripe.json?.error);
+  assert(
+    (stripe.json?.error ?? '').includes('not available'),
+    'the error says what is missing and which providers are configured',
+    stripe.json?.error,
+  );
   assert((await available(m3.token, m3.productId, m3.variantId)) === 5, 'a refused provider holds no stock');
 
   // ---------------------------------------------------- cash on delivery
@@ -251,6 +255,86 @@ try {
   assert(tampered.status === 201, 'a checkout with forged pricing fields still succeeds');
   assert(tampered.json?.totals?.tax?.amount === 10, 'client-supplied taxRate is ignored', `tax $${tampered.json?.totals?.tax?.amount}`);
   assert(tampered.json?.totals?.shipping?.amount === 5, 'client-supplied shipping is ignored', `shipping $${tampered.json?.totals?.shipping?.amount}`);
+
+  // ------------------------------------------------------------------- cart
+  console.log('\n— Panier persistant —');
+  const m4 = await setupMerchant('cart', { stock: 5, taxRate: 0.2, shippingFlatRate: 3, price: 40 });
+
+  const cartCreated = await api('POST', `/api/storefront/stores/${m4.storeSlug}/carts`, {
+    body: { sessionId: 'session-abc-123' },
+  });
+  assert(cartCreated.status === 201, 'a cart can be created without a merchant token', `HTTP ${cartCreated.status}`);
+  const cartId = cartCreated.json?.id;
+  assert(cartCreated.json?.itemCount === 0, 'a new cart is empty');
+
+  const added = await api('POST', `/api/storefront/stores/${m4.storeSlug}/carts/${cartId}/lines`, {
+    body: { productId: m4.productId, quantity: 2 },
+  });
+  assert(added.status === 201 && added.json?.itemCount === 2, 'a line can be added', `${added.json?.itemCount} item(s)`);
+  assert(added.json?.lines?.[0]?.title?.includes('cart Widget'), 'the cart returns product data, not just ids', added.json?.lines?.[0]?.title);
+  assert(added.json?.totals?.subtotal?.amount === 80, 'cart subtotal is computed', `$${added.json?.totals?.subtotal?.amount}`);
+  assert(added.json?.totals?.tax?.amount === 16 && added.json?.totals?.shipping?.amount === 3, 'cart totals include store tax and shipping');
+  assert(added.json?.available === true, 'the cart reports live availability');
+
+  const reloaded = await api('GET', `/api/storefront/stores/${m4.storeSlug}/carts/${cartId}`);
+  assert(reloaded.json?.itemCount === 2, 'the cart survives a reload', `${reloaded.json?.itemCount} item(s)`);
+
+  const overAdd = await api('POST', `/api/storefront/stores/${m4.storeSlug}/carts/${cartId}/lines`, {
+    body: { productId: m4.productId, quantity: 4 },
+  });
+  assert(overAdd.status === 409, 'adding beyond stock is refused (2 + 4 > 5)', `HTTP ${overAdd.status}`);
+
+  const lineId = added.json.lines[0].id;
+  const updated = await api('PATCH', `/api/storefront/stores/${m4.storeSlug}/carts/${cartId}/lines/${lineId}`, {
+    body: { quantity: 3 },
+  });
+  assert(updated.json?.itemCount === 3, 'a line quantity can be updated', `${updated.json?.itemCount} item(s)`);
+  assert(updated.json?.totals?.subtotal?.amount === 120, 'totals follow the new quantity', `$${updated.json?.totals?.subtotal?.amount}`);
+
+  const removed = await api('DELETE', `/api/storefront/stores/${m4.storeSlug}/carts/${cartId}/lines/${lineId}`);
+  assert(removed.json?.itemCount === 0, 'a line can be removed', `${removed.json?.itemCount} item(s)`);
+
+  // Re-add, then buy the cart: the order must come from the cart, not the body.
+  await api('POST', `/api/storefront/stores/${m4.storeSlug}/carts/${cartId}/lines`, {
+    body: { productId: m4.productId, quantity: 2 },
+  });
+  const cartCheckout = await api('POST', `/api/storefront/stores/${m4.storeSlug}/checkout`, {
+    body: { cartId, customerEmail: 'cart-buyer@example.com', shippingAddress: shipping },
+  });
+  assert(cartCheckout.status === 201, 'a cart can be checked out', `HTTP ${cartCheckout.status}`);
+  assert(cartCheckout.json?.totals?.total?.amount === 99, 'the order total comes from the cart', `$${cartCheckout.json?.totals?.total?.amount}`);
+  assert((await available(m4.token, m4.productId, m4.variantId)) === 3, 'buying the cart consumed its stock', '5 → 3');
+
+  const consumed = await api('GET', `/api/storefront/stores/${m4.storeSlug}/carts/${cartId}`);
+  assert(consumed.status === 404, 'the cart is consumed by the order, not left dangling', `HTTP ${consumed.status}`);
+
+  // A rejected checkout must leave the basket intact.
+  const bigCart = await api('POST', `/api/storefront/stores/${m4.storeSlug}/carts`, { body: {} });
+  const bigCartId = bigCart.json.id;
+  await api('POST', `/api/storefront/stores/${m4.storeSlug}/carts/${bigCartId}/lines`, {
+    body: { productId: m4.productId, quantity: 3 },
+  });
+  await api('PUT', `/api/inventory/${m4.productId}/${m4.variantId}`, { token: m4.token, body: { stock: 1 } });
+  const refusedCart = await api('POST', `/api/storefront/stores/${m4.storeSlug}/checkout`, {
+    body: { cartId: bigCartId, customerEmail: 'cart-buyer@example.com', shippingAddress: shipping },
+  });
+  assert(refusedCart.status === 409, 'checkout is refused when stock vanished meanwhile', `HTTP ${refusedCart.status}`);
+  const stillThere = await api('GET', `/api/storefront/stores/${m4.storeSlug}/carts/${bigCartId}`);
+  assert(stillThere.status === 200 && stillThere.json?.itemCount === 3, 'a refused checkout keeps the basket intact');
+
+  // Claiming merges instead of discarding.
+  const anonCart = await api('POST', `/api/storefront/stores/${m4.storeSlug}/carts`, { body: {} });
+  await api('POST', `/api/storefront/stores/${m4.storeSlug}/carts/${anonCart.json.id}/lines`, {
+    body: { productId: m4.productId, quantity: 1 },
+  });
+  const claimed = await api('POST', `/api/storefront/stores/${m4.storeSlug}/carts/${anonCart.json.id}/claim`, {
+    body: { customerId: 'customer-xyz' },
+  });
+  assert(claimed.status === 200 && claimed.json?.customerId === 'customer-xyz', 'an anonymous cart can be claimed');
+  const claimedAgain = await api('POST', `/api/storefront/stores/${m4.storeSlug}/carts/${anonCart.json.id}/claim`, {
+    body: { customerId: 'customer-xyz' },
+  });
+  assert(claimedAgain.json?.itemCount === 1, 'claiming twice does not duplicate lines', `${claimedAgain.json?.itemCount} item(s)`);
 
   // ------------------------------------------------------- low stock report
   console.log('\n— Alertes de stock —');

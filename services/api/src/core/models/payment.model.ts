@@ -8,6 +8,8 @@ export interface IPayment {
   orderId: string;
   provider: string;
   providerRef?: string;
+  /** Handed to the storefront so it can confirm the payment with the provider. */
+  clientSecret?: string;
   status: PaymentStatus;
   amount: { amount: number; currency: string };
   createdAt: Date;
@@ -21,6 +23,7 @@ const PaymentSchema = new Schema<IPayment>(
     orderId: { type: String, required: true, index: true },
     provider: { type: String, required: true },
     providerRef: { type: String },
+    clientSecret: { type: String },
     status: {
       type: String,
       enum: ['REQUIRES_ACTION', 'PROCESSING', 'SUCCEEDED', 'FAILED', 'REFUNDED', 'CANCELLED'],

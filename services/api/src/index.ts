@@ -31,6 +31,7 @@ import { aiModule } from './modules/ai/ai.routes.js';
 import { billingModule } from './modules/billing/billing.routes.js';
 import { adminModule } from './modules/admin/admin.routes.js';
 import { storefrontModule } from './modules/storefront/storefront.routes.js';
+import { storefrontCartModule } from './modules/storefront/cart.routes.js';
 import { errorHandler, notFoundHandler } from './core/errors.js';
 import { healthRouter } from './core/health.js';
 
@@ -39,6 +40,9 @@ export function createApp() {
 
   app.use(helmet());
   app.use(cors());
+  // Stripe signs the raw request body, so the webhook must receive unparsed
+  // bytes. Mounted before the JSON parser, which would otherwise consume them.
+  app.use('/api/payments/webhooks', express.raw({ type: 'application/json' }));
   app.use(express.json({ limit: '2mb' }));
 
   app.get('/health', (_req, res) => {
@@ -67,6 +71,7 @@ export function createApp() {
   app.use('/api/billing', billingModule);
   app.use('/api/admin', adminModule);
   app.use('/api/storefront', storefrontModule);
+  app.use('/api/storefront', storefrontCartModule);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

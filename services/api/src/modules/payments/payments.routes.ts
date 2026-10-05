@@ -7,13 +7,30 @@ import { requirePermission } from '../../core/middleware/requirePermission.js';
 import { ApiError } from '../../core/errors.js';
 import { wrap } from '../../core/context.js';
 import { createPayment, refundPayment, listPaymentsForOrder } from './payments.service.js';
-import { MockPaymentProvider } from './providers/mock.provider.js';
-import { registerPaymentProvider, listPaymentProviders } from './payments.provider.js';
+import { handleStripeWebhook } from './stripe.webhook.js';
+import { bootstrapPaymentProviders } from './providers/index.js';
 
 export const paymentsModule = Router();
 
-// Register providers — Stripe lands here when credentials are configured.
-registerPaymentProvider(new MockPaymentProvider());
+/**
+ * Stripe webhooks are unauthenticated by nature (Stripe is the caller) and must
+ * be mounted *before* the merchant auth middleware. Their authenticity comes from
+ * the HMAC signature, not from a bearer token.
+ */
+paymentsModule.post(
+  '/webhooks/stripe',
+  wrap(async (req, res) => {
+    const signature = req.headers['stripe-signature'];
+    const result = await handleStripeWebhook(
+      req.body as Buffer,
+      typeof signature === 'string' ? signature : undefined,
+    );
+    res.json(result);
+  }),
+);
+
+// Providers are registered from configuration, not hardcoded.
+bootstrapPaymentProviders();
 
 paymentsModule.use(authenticate(loadConfig().jwt.accessSecret), resolveTenant);
 
@@ -33,7 +50,7 @@ paymentsModule.get(
   '/providers',
   requirePermission('orders.read'),
   wrap(async (_req, res) => {
-    res.json({ providers: listPaymentProviders() });
+    res.json({ providers: bootstrapPaymentProviders() });
   }),
 );
 
@@ -81,7 +98,7 @@ paymentsModule.get(
   requirePermission('orders.read'),
   wrap(async (req, res) => {
     res.json({
-      items: listPaymentsForOrder(req.tenant!.tenantId, req.params.orderId!),
+      items: await listPaymentsForOrder(req.tenant!.tenantId, req.params.orderId!),
     });
   }),
 );

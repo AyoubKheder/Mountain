@@ -32,7 +32,9 @@ import {
   type ShippingAddress,
 } from '../orders/orders.service.js';
 import { createPayment, getPayment, type PaymentRecord } from '../payments/payments.service.js';
+import { requireCart, deleteCart } from '../cart/cart.service.js';
 import { upsertCustomer, getCustomer, recordOrder, type CustomerRecord } from '../customers/customers.service.js';
+import { isProviderAvailable, availableProviders } from '../payments/providers/index.js';
 import {
   reserveForOrder,
   releaseReservation,
@@ -41,9 +43,12 @@ import {
   type ReservationLine,
 } from '../inventory/inventory.service.js';
 
-/** Providers the platform can actually settle today. */
-export const IMPLEMENTED_PROVIDERS = ['MOCK', 'CASH_ON_DELIVERY'] as const;
-export type ImplementedProvider = (typeof IMPLEMENTED_PROVIDERS)[number];
+/**
+ * Providers that settle instantly in-process. Stripe joins this set at runtime
+ * when `STRIPE_SECRET_KEY` is configured — see providers/index.ts.
+ */
+export const BUILT_IN_PROVIDERS = ['MOCK', 'CASH_ON_DELIVERY'] as const;
+export type ImplementedProvider = (typeof BUILT_IN_PROVIDERS)[number];
 
 export const ALL_PROVIDERS = ['MOCK', 'CASH_ON_DELIVERY', 'STRIPE'] as const;
 export type CheckoutProvider = (typeof ALL_PROVIDERS)[number];
@@ -65,7 +70,9 @@ export interface PlaceOrderInput {
   storeId?: string;
   taxRate?: number;
   shippingAmount?: number;
-  items: CheckoutItem[];
+  /** Basket to buy. When supplied, `items` is taken from it server-side. */
+  cartId?: string;
+  items?: CheckoutItem[];
   customerId?: string;
   customerEmail?: string;
   customerName?: string;
@@ -80,6 +87,8 @@ export interface PlaceOrderResult {
   payment?: PaymentRecord;
   /** True when this call replayed an earlier attempt instead of creating one. */
   replayed: boolean;
+  /** The cart that was consumed, if the order came from one. */
+  cartId?: string;
 }
 
 interface IdempotencyRecord {
@@ -101,16 +110,21 @@ function idempotencyKey(tenantId: string, storeId: string | undefined, key: stri
  * Fails fast on providers we cannot settle. Recording an order as PENDING
  * against a provider that was never called is worse than refusing: the merchant
  * believes the sale is paid when no money moved.
+ *
+ * The registry is the single source of truth, so configuring Stripe is enough to
+ * make it selectable — and removing its key makes it refuse again.
  */
 function guardProvider(provider: OrderPaymentProvider | undefined): OrderPaymentProvider {
   const resolved = provider ?? 'MOCK';
   if (resolved === 'NONE') return resolved;
 
-  if (!IMPLEMENTED_PROVIDERS.includes(resolved as ImplementedProvider)) {
+  if (resolved === 'CASH_ON_DELIVERY') return resolved;
+
+  if (!isProviderAvailable(resolved)) {
     throw new ApiError(
       501,
-      `Payment provider "${resolved}" is not implemented yet. ` +
-        `Available: ${IMPLEMENTED_PROVIDERS.join(', ')}. ` +
+      `Payment provider "${resolved}" is not available. ` +
+        `Configured: ${availableProviders().join(', ') || 'none'}. ` +
         'The order was not created and no stock was held.',
     );
   }
@@ -177,8 +191,35 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
     }
   }
 
-  // --- Catalogue resolution --------------------------------------------------
-  const { lines, orderItems } = await resolveLines(input.tenantId, input.items);
+  // --- Basket resolution -----------------------------------------------------
+  // When a cart is supplied it is authoritative: the server reads the lines from
+  // it rather than trusting a client-supplied item list, which is also what makes
+  // the idempotency key safe to reuse.
+  let checkoutItems = input.items ?? [];
+
+  if (input.cartId) {
+    const cart = await requireCart(input.tenantId, input.cartId);
+    if (cart.items.length === 0) {
+      throw new ApiError(409, 'This cart is empty');
+    }
+    // A cart belongs to the store it was created in, so an order cannot be
+    // assembled from another store's basket.
+    if (input.storeId && cart.storeId && cart.storeId !== input.storeId) {
+      throw new ApiError(409, 'Cart does not belong to this store');
+    }
+    checkoutItems = cart.items.map((item) => ({
+      productId: item.productId,
+      variantId: item.variantId,
+      quantity: item.quantity,
+    }));
+    if (!input.customerId && cart.customerId) input.customerId = cart.customerId;
+  }
+
+  if (checkoutItems.length === 0) {
+    throw new ApiError(400, 'Order requires at least one item');
+  }
+
+  const { lines, orderItems } = await resolveLines(input.tenantId, checkoutItems);
 
   // --- Stock hold ------------------------------------------------------------
   // Taken before anything is recorded: if the basket cannot be served, the
@@ -233,13 +274,16 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
   // --- Payment ---------------------------------------------------------------
   let payment: PaymentRecord | undefined;
 
-  if (provider === 'MOCK') {
+  // 'NONE' records the order without capturing anything (phone orders, manual
+  // invoices); COD holds stock until the courier collects.
+  if (provider !== 'CASH_ON_DELIVERY' && provider !== 'NONE') {
     payment = await createPayment({
       tenantId: input.tenantId,
       orderId: order.id,
-      providerId: 'MOCK',
+      providerId: provider,
       amount: order.totals.total,
     });
+
     if (payment.status === 'SUCCEEDED') {
       // Money is in: turn the hold into a real stock decrement.
       await commitReservation(order.id);
@@ -248,11 +292,22 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
         await transitionOrder(input.tenantId, order.id, 'CONFIRMED', `Paid via ${provider}`);
       }
     }
+    // Stripe returns REQUIRES_ACTION: the order stays PENDING and the hold stays
+    // held until the signed webhook confirms settlement. Money never moves on the
+    // strength of a browser redirect.
   }
   // CASH_ON_DELIVERY keeps the hold and stays PENDING until the courier collects.
 
   if (customer) {
     await recordOrder(input.tenantId, customer.id, order.totals.total).catch(() => undefined);
+  }
+
+  // The basket has become an order, so it is consumed. Done only after the order
+  // exists — a rejected checkout must leave the shopper's cart intact.
+  if (input.cartId) {
+    await deleteCart(input.tenantId, input.cartId).catch((err) =>
+      console.warn('[checkout] could not delete cart:', (err as Error).message),
+    );
   }
 
   if (idemKey) {
@@ -266,7 +321,7 @@ export async function placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResu
     });
   }
 
-  return { order, customer, payment, replayed: false };
+  return { order, customer, payment, replayed: false, cartId: input.cartId };
 }
 
 /**

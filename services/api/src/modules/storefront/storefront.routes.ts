@@ -164,6 +164,8 @@ const checkoutSchema = z.object({
     country: z.string().min(1),
     phone: z.string().optional(),
   }),
+  /** When supplied, the server reads the basket from the cart, not the body. */
+  cartId: z.string().min(1).optional(),
   items: z
     .array(
       z.object({
@@ -172,7 +174,7 @@ const checkoutSchema = z.object({
         quantity: z.number().int().positive().max(99),
       }),
     )
-    .min(1),
+    .optional(),
   paymentProvider: z.enum(['MOCK', 'STRIPE', 'CASH_ON_DELIVERY']).default('MOCK'),
   /** May also be supplied as an `Idempotency-Key` header. */
   idempotencyKey: z.string().min(8).max(200).optional(),
@@ -235,7 +237,13 @@ storefrontModule.post(
       throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid checkout payload');
     }
 
-    const { customerEmail, customerName, shippingAddress, items, paymentProvider } = parsed.data;
+    const { customerEmail, customerName, shippingAddress, items, cartId, paymentProvider } =
+      parsed.data;
+
+    if (!cartId && (!items || items.length === 0)) {
+      throw new ApiError(400, 'Provide either a cartId or a non-empty items list');
+    }
+
     const headerKey = req.headers['idempotency-key'];
     const idempotencyKey =
       parsed.data.idempotencyKey ?? (typeof headerKey === 'string' ? headerKey : undefined);
@@ -243,6 +251,7 @@ storefrontModule.post(
     const result = await placeOrder({
       tenantId: store.tenantId,
       storeId: store.id,
+      cartId,
       items,
       customerEmail,
       customerName,
@@ -263,7 +272,20 @@ storefrontModule.post(
       customerEmail: result.customer?.email ?? customerEmail,
       customerId: result.customer?.id,
       shippingAddress,
-      payment: result.payment,
+      cartId: result.cartId,
+      payment: result.payment
+        ? {
+            id: result.payment.id,
+            provider: result.payment.provider,
+            status: result.payment.status,
+            amount: result.payment.amount,
+            // A real PSP (Stripe) needs the shopper to confirm client-side; this
+            // is the token the storefront uses to do that. Null for providers
+            // that settle server-side.
+            clientSecret: result.payment.clientSecret ?? null,
+          }
+        : null,
+      /** True when the request replayed an earlier attempt instead of selling again. */
       replayed: result.replayed,
     });
   }),
